@@ -39,7 +39,7 @@ import sys
 import numpy as np
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFile, ImageFilter, ImageFont, ImageOps
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 SIZES = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440), "4k": (3840, 2160)}
 PHONE_SIZE = (1280, 720)
@@ -655,6 +655,17 @@ def crop_to_alpha(img):
     img = img.convert("RGBA")
     box = img.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
     return img.crop(box) if box else None
+
+
+def shown_ratio(ratio):
+    """A contrast ratio as printed: one decimal, truncated below the 4.5:1 minimum so a failing 4.46 never
+    reads as a passing 4.5 (the summary line and the warning agree)."""
+    return int(ratio * 10) / 10.0 if ratio < MIN_CONTRAST else ratio
+
+
+def color_flag(name):
+    """The flag that sets an element's color, for contrast advice."""
+    return "--title-color" if name in ("title", "hook") else "--accent" if name == "label box" else "color"
 
 
 def cut_out(img):
@@ -1649,7 +1660,8 @@ def _choose_layout(j):
                 text_side = "left" if left <= right else "right"
         info["text_side"] = text_side if layout == "single" else "bottom"
     bg = rgb(bg) if bg else dark_tone(backgrounds[0])
-    push = (0.5 if subjects else 0.0) if push is None else push
+    # --push only ever softens the photo behind a cut-out; a channel file's push must not blur plain captures
+    push = (0.5 if push is None else push) if subjects else 0.0
     focus_eff = focus
     if focus is None and cv.tall and j.subject_box is not None:  # the face wins over an inset on tall crops
         focus_eff = focus_on(j.subject_box, src, cv.w, cv.h)
@@ -2254,9 +2266,9 @@ def _check_result(j):
     if failing:
         info["contrast_element"] = failing[0][0]
     for name, ratio, light, best in failing:
-        ratio = int(ratio * 10) / 10.0  # never print 4.49 as 4.5
+        ratio = shown_ratio(ratio)
         if light and best < MIN_CONTRAST * 1.05:
-            fix = "use --logo-white or a lighter logo" if name == "logo" else "use a lighter --accent"
+            fix = "use --logo-white or a lighter logo" if name == "logo" else "use a lighter %s" % color_flag(name)
             warnings.append("the %s has %.1f:1 contrast (want %.1f:1 or more): its color is too dim to read "
                             "even on black; %s." % (name, ratio, MIN_CONTRAST, fix))
         elif light:
@@ -2273,7 +2285,8 @@ def _check_result(j):
             warnings.append("the %s has %.1f:1 contrast (want %.1f:1 or more): the background under it is "
                             "bright; %s." % (name, ratio, MIN_CONTRAST, hint))
         else:
-            fix = "use --logo-white or a light version of the logo" if name == "logo" else "use a light --accent"
+            fix = ("use --logo-white or a light version of the logo" if name == "logo"
+                   else "use a light %s" % color_flag(name))
             warnings.append("the %s has %.1f:1 contrast (want %.1f:1 or more): its color is too dark for the "
                             "background; %s." % (name, ratio, MIN_CONTRAST, fix))
     info["text_box"] = bbox
@@ -2878,7 +2891,8 @@ def main(argv=None):
                       system_fonts=bool(s["system_fonts"]), band=s["band"],
                       size=s["size"], panels=[open_image(p, "panel") for p in args.panel or []] or None,
                       panel_labels=args.panel_label,
-                      subjects=[open_image(p, "subject") for p in args.subject or []] or None,
+                      # cut out once: rembg would otherwise run again for every variant and format
+                      subjects=[cut_out(open_image(p, "subject")) for p in args.subject or []] or None,
                       push=s["push"], inset=open_image(args.inset, "inset") if args.inset else None,
                       inset_box=args.inset_box, crop=args.crop, subject_box=args.subject_box)
         src = open_image(args.capture, "capture") if args.capture else None
@@ -2903,7 +2917,7 @@ def main(argv=None):
                            % ("A" if lead == "title" else "B", lead)))
         print("layout %s, source %dx%d, scaled %.2fx, type %s, contrast %.1f:1"
               % (info["layout"], info["source"][0], info["source"][1], info["scale"], info["text_side"],
-                 info["contrast"]))
+                 shown_ratio(info["contrast"])))
         for rep in info.get("subjects", []):
             print("subject matched: %s" % ", ".join("%s %s" % kv for kv in rep.items()))
         if "inset" in info:

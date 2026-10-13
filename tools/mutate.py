@@ -171,6 +171,17 @@ MUTANTS = [
      "DurationBadge.test_small_preview_text_keeps_its_word_spaces"),
     ("caption word space ignored", "            a = max(a, space)", "            pass",
      "DurationBadge.test_small_preview_text_keeps_its_word_spaces"),
+    ("push blurs plain captures", "    push = (0.5 if push is None else push) if subjects else 0.0",
+     "    push = (0.5 if subjects else 0.0) if push is None else push",
+     "ReviewArgon.test_push_only_softens_behind_a_subject"),
+    ("contrast advice always --accent",
+     '    return "--title-color" if name in ("title", "hook") else "--accent" if name == "label box" else "color"',
+     '    return "--accent"', "ReviewArgon.test_contrast_advice_names_the_flag_that_sets_the_color"),
+    ("failing ratio rounded up", "    return int(ratio * 10) / 10.0 if ratio < MIN_CONTRAST else ratio",
+     "    return round(ratio, 1)", "ReviewArgon.test_summary_and_warning_print_the_same_failing_ratio"),
+    ("rembg once per variant", 'subjects=[cut_out(open_image(p, "subject")) for p in args.subject or []] or None,',
+     'subjects=[open_image(p, "subject") for p in args.subject or []] or None,',
+     "ReviewArgon.test_rembg_runs_once_per_subject_across_variants_and_formats"),
 ]
 
 

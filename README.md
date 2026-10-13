@@ -25,6 +25,7 @@
   <a href="#examples">Examples</a> ·
   <a href="#creator-photo">Creator Photo</a> ·
   <a href="#example">Two Variants</a> ·
+  <a href="#dawnwalker">Official Logo</a> ·
   <a href="#subject-demo">Subject Layer</a> ·
   <a href="#image-roles">Image Roles</a> ·
   <a href="#formats">Formats</a> ·
@@ -203,7 +204,8 @@ White (left) and `--title-color auto` (right): the art's gold `#a7753d` is light
 | [Skill instructions](skill/clean-thumbnail/SKILL.md) | Assigns image roles, derives short text, renders the A/B pair, and reviews the result. |
 | [Type rules](skill/clean-thumbnail/references/type-rules.md) | Turns any video title into a subject and a hook, with examples across topics. |
 | [Channel settings example](skill/clean-thumbnail/references/channel.example.json) | Style, fonts, title and label colors, lead, size, and formats saved once for every video. |
-| [Bundled fonts](skill/clean-thumbnail/fonts/) and [matching guide](skill/clean-thumbnail/references/fonts.md) | 16 open-licensed display fonts (Roman capitals to pixel) so the big type can look like the game, film, or brand. |
+| [Bundled fonts](skill/clean-thumbnail/fonts/) and [matching guide](skill/clean-thumbnail/references/fonts.md) | 16 open-licensed display fonts (Roman capitals to pixel) so the big type can look like the game, film, or brand, each with its `OFL.txt`; [`catalog.json`](skill/clean-thumbnail/fonts/catalog.json) lists their real family names, weights, spacing and the looks they fit. |
+| [`agents/openai.yaml`](skill/clean-thumbnail/agents/openai.yaml) | Display name, short description and default prompt for Codex's skill list. |
 | [`thumb.py`](skill/clean-thumbnail/scripts/thumb.py) | Composes, matches layers, typesets, checks, and exports. |
 | [Demo](demo/) | Five worked examples (Simon; Dawnwalker with its logo; a creator photo; a cut-out over a separate room; a Death Stranding 2 capture for 4:5 and 9:16): source images, A/B variants, vertical formats, and feed-size previews. |
 | [Tests](tests/) | Resolution, layout, lead, image roles, layer matching, contrast, formats, cropping, fonts, colors, channel settings, and the CLI. |
@@ -235,12 +237,18 @@ python skill/clean-thumbnail/scripts/thumb.py crt.jpg --inset frame.png --inset-
 
 | Option | When to use it |
 |---|---|
+| `-o PATH` | Output stem, `.jpg` name or folder (default `<capture>_thumb`). Variants and formats add `_A`, `_B`, `_4x5`, `_9x16`, so a second run with the same `-o` for other formats keeps the first run's files; an `-o` that would overwrite an input stops with an error. |
+| `--style serif\|sans` | The default title look when no logo or matched font is given: bundled Playfair Display Bold or Outfit Bold. |
+| `--panel A --panel B --panel-label L` | Comparison panels (2 or 3) instead of a capture, each with its label, in the same order. |
+| `--kicker TEXT` / `--subtitle TEXT` | A small line above or below the big type; off unless given (see the [type rules](skill/clean-thumbnail/references/type-rules.md)). |
 | `--lead title\|label\|ab` | Which slot is big. `ab` (default) renders both. |
 | `--text-side left\|right` | Override the automatically chosen calmer side. |
 | `--focus 0..1` | Move the horizontal crop on a wide source. |
 | `--crop x0,y0,x1,y1` | Keep part of the capture (fractions of it as given). Narrower than 16:9, the art moves to the far side, which makes room for the type when the subject is in the middle. |
 | `--subject-box x0,y0,x1,y1` | Mark the face (or a product's label) in the capture, in fractions of it as given: from the brows to the chin, not the hair or the whole body. The 16:9 type takes the side that keeps it clear, the 4:5 and 9:16 crops center on it, the 9:16 type band moves to the top when that shades it less, and a warning fires when it still ends up under type or shade or out of frame, naming one fix: a `--crop`, `--focus` or `--text-side` to try on 16:9, or `--band` on 4:5 and 9:16. |
 | `--band auto\|top\|bottom` | Where the type band goes on 4:5 and 9:16. `auto` (default) keeps the bottom, or takes the top when that keeps `--subject-box` clearly more in view. |
+| `--feather 0..1` | Length of the fade where narrow or cropped art meets the dark side, as a share of the art's width (default 0.36). Shorten it when the fade reaches a face. |
+| `--shade 0..1` / `--bg #hex` | Darkness of the type side (default 0.88) and its color (default: taken from the image's shadows). |
 | `--push 0..1` | How much to soften the background behind subjects (default 0.5). |
 | `--logo logo.png --logo-white` | Use a transparent logo in place of rendered title text. |
 | `--title-font NAME\|FILE` | A bundled font matched to the game's or brand's lettering (`cinzel`, `bebas`, `orbitron`...; `--list-fonts`), or your own font file. |

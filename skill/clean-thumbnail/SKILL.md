@@ -5,7 +5,7 @@ license: MIT for the code; the bundled fonts are SIL OFL 1.1 (fonts/*/OFL.txt)
 compatibility: Python 3.8+ with numpy and Pillow. Uses its 16 bundled OFL fonts by default (Playfair Display and Outfit for the default title and label), so the same command gives the same type on every OS; --system-fonts opts into installed faces (Bodoni MT, Bahnschrift, Didot), and any font file can be passed in. Optional rembg for removing backgrounds from subject photos.
 metadata:
   author: Rizwan Ahmed
-  version: "0.8.1"
+  version: "0.8.2"
 ---
 
 # Clean thumbnail
@@ -110,20 +110,25 @@ the screen or frame is.
    below it. With a centered face, `--subject-box` moves the band to the top when that clears it and
    warns when it can't; without a box the band stays at the bottom and shades it. When the wide capture
    doesn't suit, ask for (or pick from the user's captures) one that does and render it in a second
-   run with `--aspect 4:5,9:16`. The vertical crop centers on `--subject-box`; without one it follows
+   run with `--aspect 4:5,9:16` (the same `-o` is fine: vertical files get `_4x5` and `_9x16`
+   suffixes, so the 16:9 files stay). The vertical crop centers on `--subject-box`; without one it follows
    the busiest part of the frame, which is sometimes scenery: then pass a box or `--focus`.
 
    **Subject in the middle?** In a 16:9 thumbnail the type and its shade then land on the subject
    whichever side they take, and `--focus` can't help (it only moves the 16:9 crop on captures wider
    than 16:9). With `--subject-box`, the warning prints a crop that clears it, e.g.
-   `try --crop 0.11,0,0.96,1 --text-side right`: re-run with it. By hand: keep a narrower part of the
+   `try --crop 0.11,0,0.96,1 --text-side right`: re-run with it and keep the same `--subject-box`
+   (both take fractions of the image as given, so the box needs no recalculating). By hand: keep a narrower part of the
    image with `--crop x0,y0,x1,y1` (fractions of the image as given): about 75-80% of the width, with
    the subject toward the side away from the type. Narrower than 16:9, the art moves to the far side
    and fades into the dark side. The crop applies to every format; bars are still trimmed. A crop
    can also keep a second element in view that the box doesn't know about (the creator demo keeps
    the camera phone visible this way).
 
-   Other flags: `--subject-box x0,y0,x1,y1`, `--band auto|top|bottom` (type band on 4:5 and 9:16),
+   Other flags: `--style serif|sans` (default title look), `--kicker TEXT` / `--subtitle TEXT` (small
+   lines above or below the big type; see the type rules), `--feather 0..1` (fade length of narrow or
+   cropped art; shorten it when the fade reaches a face), `--shade 0..1` and `--bg #hex` (darkness and
+   color of the type side), `--subject-box x0,y0,x1,y1`, `--band auto|top|bottom` (type band on 4:5 and 9:16),
    `--text-side left|right`, `--focus 0..1` (crop position on wide captures),
    `--logo logo.png --logo-white` (logo as the title), `--title-font NAME|FILE` / `--label-font`,
    `--list-fonts`, `--system-fonts` (installed faces instead of the bundled defaults; the look then

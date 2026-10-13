@@ -1975,5 +1975,68 @@ class SystemFonts(unittest.TestCase):
             self.assertTrue(self.bundled(spec) and "Outfit" in spec and spec.endswith("@SemiBold"), spec)
 
 
+
+class ReviewArgon(unittest.TestCase):
+    """Regression tests from the v0.8.1 outside review."""
+
+    def test_push_only_softens_behind_a_subject(self):
+        bg = half_busy(1280, 720)
+        plain, _ = thumb.render(bg, "SIMON", "No hit", lead="title")
+        pushed, _ = thumb.render(bg, "SIMON", "No hit", lead="title", push=0.5)
+        self.assertTrue(np.array_equal(np.asarray(plain), np.asarray(pushed)))  # no cut-out, nothing to soften
+        with tempfile.TemporaryDirectory() as d:
+            bg.save(os.path.join(d, "cap.png"))
+            run_cli(["cap.png", "--title", "SIMON", "--lead", "title", "-o", "plain"], cwd=d)
+            with open(os.path.join(d, thumb.CHANNEL_FILE), "w") as f:
+                json.dump({"push": 0.5}, f)  # as copied from references/channel.example.json
+            run_cli(["cap.png", "--title", "SIMON", "--lead", "title", "-o", "chan"], cwd=d)
+            with Image.open(os.path.join(d, "plain.jpg")) as a, Image.open(os.path.join(d, "chan.jpg")) as b:
+                self.assertTrue(np.array_equal(np.asarray(a), np.asarray(b)))
+
+    def test_contrast_advice_names_the_flag_that_sets_the_color(self):
+        _, info = thumb.render(half_busy(), "SIMON", "Parry only", title_color="#1b2a8a", lead="title",
+                               text_side="left")
+        bad = [w for w in info["warnings"] if w.startswith("the title has")]
+        self.assertTrue(bad)
+        self.assertIn("--title-color", bad[0])
+        self.assertNotIn("--accent", bad[0])
+        self.assertEqual(thumb.color_flag("hook"), "--title-color")
+        self.assertEqual(thumb.color_flag("label box"), "--accent")
+
+    def test_summary_and_warning_print_the_same_failing_ratio(self):
+        self.assertEqual(thumb.shown_ratio(4.46), 4.4)  # never a passing-looking 4.5
+        self.assertEqual("%.1f" % thumb.shown_ratio(4.46), "4.4")
+        self.assertEqual("%.1f" % thumb.shown_ratio(4.5), "4.5")
+        self.assertEqual("%.1f" % thumb.shown_ratio(14.53), "14.5")
+
+    def test_rembg_runs_once_per_subject_across_variants_and_formats(self):
+        import types
+        calls = []
+
+        def remove(img):
+            calls.append(1)
+            out = img.convert("RGBA")
+            a = Image.new("L", out.size, 0)
+            ImageDraw.Draw(a).ellipse((20, 20, out.width - 20, out.height - 20), fill=255)
+            out.putalpha(a)
+            return out
+
+        saved = sys.modules.get("rembg")
+        sys.modules["rembg"] = types.SimpleNamespace(remove=remove)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                half_busy(1280, 720).save(os.path.join(d, "cap.png"))
+                Image.new("RGB", (400, 600), (90, 110, 150)).save(os.path.join(d, "me.jpg"))  # no transparency
+                code, text = run_cli(["cap.png", "--subject", "me.jpg", "--title", "X", "--label", "Y",
+                                      "--aspect", "all", "-o", "t"], cwd=d)
+                self.assertEqual(code, 0, text)
+        finally:
+            if saved is None:
+                sys.modules.pop("rembg", None)
+            else:
+                sys.modules["rembg"] = saved
+        self.assertEqual(len(calls), 1)  # not once per variant and format (6)
+
+
 if __name__ == "__main__":
     unittest.main()
