@@ -20,6 +20,15 @@ The channel's saved `title_font` (in `clean-thumbnail.json`) is the default; a m
 this video overrides it for this run only. The script prints `title type: ...` for every variant,
 and `--list-fonts` prints the catalog with each font's real family name.
 
+**The defaults** are bundled, so the same command sets the same type on every OS: the serif style
+is `playfair@Bold` at 0.06 em, the sans style `outfit@Bold` at 0.02 em, and the label box (and the
+preview captions, always) `outfit@SemiBold`. `--title-font playfair` gives the catalog's SemiBold at
+0.04 em instead; use `playfair@Bold --title-tracking 0.06` to match the default by name.
+`--system-fonts` (or `"system_fonts": true`) tries installed faces first, as before v0.8.0: serif
+Bodoni MT (Office), Didot (macOS), Garamond, Constantia, Georgia; sans and label Bahnschrift, Segoe
+UI Bold, Helvetica Neue (the label also Avenir Next); then the bundled fonts. The look then depends
+on the machine. An explicit `--title-font` or `--label-font` wins either way.
+
 ## Reading a logo
 
 Decide in this order; the first clear answer usually picks the font.

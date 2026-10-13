@@ -6,5 +6,6 @@
   "aspect": "16:9",
   "size": "auto",
   "shade": 0.88,
-  "push": 0.5
+  "push": 0.5,
+  "system_fonts": false
 }

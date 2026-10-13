@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.13"]
+        include:
+          # The oldest Python the README and SKILL.md claim. actions/python-versions
+          # still provides 3.8.18 for ubuntu-22.04 (checked in its versions manifest).
+          - os: ubuntu-22.04
+            python: "3.8"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: python -m pip install numpy pillow
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+      - name: Mutation check
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: python tools/mutate.py

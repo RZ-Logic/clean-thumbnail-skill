@@ -2,10 +2,10 @@
 name: clean-thumbnail
 description: Makes restrained, editorial YouTube thumbnails from real images, for any kind of video (gaming, trailers, walkthroughs, tech and hardware comparisons, sports, education, vlogs), in the style of publisher and press thumbnails instead of the loud template of glowing text, arrows, stickers and color washes. Use when someone wants a YouTube thumbnail, gives a video title with a screenshot, capture, photo or cut-out, wants a split-screen comparison thumbnail, wants themselves or a product placed in front of a background, or wants a thumbnail that doesn't look like AI slop or like everyone else's. Also makes Facebook and Instagram feed (4:5) and Reels, Shorts and Stories (9:16) versions. Turns the title into short type in the game's, film's or brand's own lettering and color, renders an A/B pair at up to 4K plus 2 MB phone copies, and checks contrast, the duration-badge corner, the Reels safe zone and feed sizes.
 license: MIT for the code; the bundled fonts are SIL OFL 1.1 (fonts/*/OFL.txt)
-compatibility: Python 3.8+ with numpy and Pillow. Uses system fonts when present (Bodoni, Constantia, Georgia, Bahnschrift, Segoe UI on Windows; Didot and Helvetica Neue on macOS), else its 16 bundled fonts, or any font file passed in. Optional rembg for removing backgrounds from subject photos.
+compatibility: Python 3.8+ with numpy and Pillow. Uses its 16 bundled OFL fonts by default (Playfair Display and Outfit for the default title and label), so the same command gives the same type on every OS; --system-fonts opts into installed faces (Bodoni MT, Bahnschrift, Didot), and any font file can be passed in. Optional rembg for removing backgrounds from subject photos.
 metadata:
   author: Rizwan Ahmed
-  version: "0.7.0"
+  version: "0.8.0"
 ---
 
 # Clean thumbnail
@@ -38,7 +38,7 @@ the screen or frame is.
 
 1. **Get the images.** The best background is a raw capture: photo mode, HUD off, 1440p or 4K,
    subject on one side with room for type on the other. Official press-kit art works; key art often
-   has the subject in the middle, which `--crop` fixes (step 5). Fan art needs
+   has the subject in the middle, which `--subject-box` and `--crop` handle (step 5). Fan art needs
    the artist's permission and credit; say so if an image looks like fan art. Don't generate or
    repaint scenes with an image model.
 2. **Write the text** with [references/type-rules.md](references/type-rules.md): the big type is what
@@ -96,23 +96,38 @@ the screen or frame is.
    in a Facebook feed card or under a Reels overlay with the profile-grid crop. Use the same text
    for every format.
 
+   **Mark the subject.** When the capture shows a person, character or product, look at it and pass
+   `--subject-box x0,y0,x1,y1` around the face (or the product's name or label), in fractions of the
+   image as given, the same way you estimate `--inset-box`. Box the face from the brows to the chin,
+   not the hair and not the whole body: type crossing a torso is fine, type or shade on a face is not. The script then puts the 16:9 type on
+   the side that keeps the box clear, centers the 4:5 and 9:16 crops on it, moves the 9:16 type band
+   to the top when that shades the face less, and warns when the box still ends up under type or
+   shade or out of frame. Each variant prints a `subject box:` line (in frame, visible, under shade,
+   under type). Not with `--panel` or `--subject` (a cut-out has its own overlap check).
+
    **A different picture for 4:5 and 9:16** is often better. The 9:16 type sits mid-frame (Reels
    safe zone), so it needs a frame with the subject's face in the top third and something calm
-   below it; centered key art that works at 16:9 gets its face shaded there. When the wide capture
+   below it. With a centered face, `--subject-box` moves the band to the top when that clears it and
+   warns when it can't; without a box the band stays at the bottom and shades it. When the wide capture
    doesn't suit, ask for (or pick from the user's captures) one that does and render it in a second
-   run with `--aspect 4:5,9:16`. The vertical crop follows the busiest part of the frame, which is
-   sometimes scenery: check the subject is in it and pass `--focus` if not (e.g. `--focus 0.46`).
+   run with `--aspect 4:5,9:16`. The vertical crop centers on `--subject-box`; without one it follows
+   the busiest part of the frame, which is sometimes scenery: then pass a box or `--focus`.
 
-   **Subject in the middle?** In a 16:9 thumbnail the type and its shade then land on the subject,
-   and `--focus` can't help there (it only moves the 16:9 crop on captures wider than 16:9). Keep a narrower part of
-   the image with `--crop x0,y0,x1,y1` (fractions of the image as given, like `--inset-box`): about
-   75-80% of the width, with the subject toward the side away from the type, e.g.
-   `--crop 0.117,0,0.898,1 --text-side left`. Narrower than 16:9, the art moves to the far side and
-   fades into the dark side. The crop applies to every format; bars are still trimmed.
+   **Subject in the middle?** In a 16:9 thumbnail the type and its shade then land on the subject
+   whichever side they take, and `--focus` can't help (it only moves the 16:9 crop on captures wider
+   than 16:9). With `--subject-box`, the warning prints a crop that clears it, e.g.
+   `try --crop 0.11,0,0.96,1 --text-side right`: re-run with it. By hand: keep a narrower part of the
+   image with `--crop x0,y0,x1,y1` (fractions of the image as given): about 75-80% of the width, with
+   the subject toward the side away from the type. Narrower than 16:9, the art moves to the far side
+   and fades into the dark side. The crop applies to every format; bars are still trimmed. A crop
+   can also keep a second element in view that the box doesn't know about (the creator demo keeps
+   the camera phone visible this way).
 
-   Other flags: `--text-side left|right`, `--focus 0..1` (crop position on wide captures),
+   Other flags: `--subject-box x0,y0,x1,y1`, `--band auto|top|bottom` (type band on 4:5 and 9:16),
+   `--text-side left|right`, `--focus 0..1` (crop position on wide captures),
    `--logo logo.png --logo-white` (logo as the title), `--title-font NAME|FILE` / `--label-font`,
-   `--list-fonts`, `--title-tracking 0..0.5` (big type letter spacing in em), `--title-color white|auto|#hex` (big type) / `--accent white|auto|#hex` (label
+   `--list-fonts`, `--system-fonts` (installed faces instead of the bundled defaults; the look then
+   varies by machine), `--title-tracking 0..0.5` (big type letter spacing in em), `--title-color white|auto|#hex` (big type) / `--accent white|auto|#hex` (label
    box), `--size 720p|1080p|1440p|4k`, `--feed DIR` (place both variants among other thumbnails).
    Each variant prints `title type: ...` and `colors: ...`, so you can tell the user what was used.
 
@@ -124,12 +139,15 @@ the screen or frame is.
    - In the squint tile, the big type and the subject should be the two things that survive. If a
      bright patch outweighs both, change the crop, the side or the image. A thin or detailed logo
      often fades here while big type holds; say so, since that is what variant B is for.
-   - If the type or its dark shade covers the subject's face or body on 16:9, narrow the art with
-     `--crop` (step 5) instead of shrinking the type. On 9:16 the type sits mid-frame for the
-     Reels safe zone and `--crop` can't move it: if the shade covers the face there, use another
-     frame for the vertical formats (step 5), or tell the user the 9:16 face is shaded.
-   - In the 4:5 and 9:16 previews, check the crop kept the subject; if it framed scenery, pass
-     `--focus`.
+   - Read the `subject box:` line of every variant. If the box is shaded or under type on 16:9,
+     re-run with the `--crop` the warning suggests (step 5) instead of shrinking the type. On 9:16
+     the type must stay inside the Reels safe zone, so the script can only move the band to the top
+     or bottom (it does so itself, and the warning names `--band` when the other band clears the
+     face): if the face is still shaded, check the box runs from the brows to the chin, shorten the
+     text, or use another frame for the vertical formats (step 5), and tell the user if the 9:16 face
+     stays shaded.
+   - Without a box (no person or product), check in the 4:5 and 9:16 previews that the crop kept
+     what matters; if it framed scenery, pass `--focus`.
    - With `auto` color, check the `colors:` line and the preview: the color should be the one the
      image is known for. If it took a side color (a red sign in a blue scene), give the hex code of
      the right one or go back to white.
@@ -139,13 +157,16 @@ the screen or frame is.
      and look at `_feed.png`: theirs should stand out.
 7. **Hand back** both variants (master and phone copy), the previews, the text used, and the title
    look and colors (from the `title type:` and `colors:` lines). The pair is for YouTube's Test &
-   Compare: let the test pick, not you.
+   Compare, which takes up to three thumbnails per video and picks the winner on watch time share,
+   not click-through rate; clearly different thumbnails finish faster. Let the test pick, not you,
+   and don't promise a third variant.
 
 ## Fixed specs
 
 Master up to 3840x2160 (YouTube accepts up to 50 MB from desktop); phone copy 1280x720 under 2 MB.
 4:5 master up to 2160x2700 with a 1080x1350 copy; 9:16 up to 2160x3840 with a 1080x1920 copy.
-Type stays out of the bottom-right corner, where the duration badge sits, inside the Reels/Shorts
+Type stays out of the bottom-right corner, where the duration badge sits (sized to the badge at
+168 px), inside the Reels/Shorts
 safe zone on 9:16, and inside the frame everywhere; it shrinks to fit the height and width, and
 warns if it still can't. Every element (title or hook lines, kicker, subtitle, label box, logo,
 panel labels) needs WCAG 4.5:1 contrast against what is behind it; the script darkens the type
@@ -154,6 +175,7 @@ it can't (a brighter background, or a `--title-color` or `--accent` too dark to 
 colors are lightened until they pass; a hand-picked color is never changed, only flagged.
 
 Inputs are checked rather than guessed: a missing named font, an opaque logo, a fully transparent
-cut-out, `--inset`/`--subject`/`--crop` with `--panel`, a `--crop` that leaves nothing, bad channel
-settings and an `-o` that would overwrite an input all stop with a clear message. Letterbox and pillarbox bars (including video black 16 and
+cut-out, `--inset`/`--subject`/`--crop`/`--subject-box` with `--panel`, `--subject-box` with
+`--subject`, a `--crop` that leaves nothing, bad channel settings and an `-o` that would overwrite an
+input all stop with a clear message. Letterbox and pillarbox bars (including video black 16 and
 bars carrying subtitles) are trimmed; dark scene edges such as a night sky are kept.

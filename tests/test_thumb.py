@@ -819,16 +819,32 @@ class ReviewRound2(unittest.TestCase):
             return r
         thumb.place_panel_labels = spy
         try:
-            out, info = thumb.render(None, "GAMING", "Big gains · Or not", kicker="Benchmark", panels=ps,
+            # the type band covers the top of panel 2, where its label would go (with the bundled fonts the
+            # label lands 52 px clear of the hook and 52 px inside the safe zone)
+            out, info = thumb.render(None, "GAMING", "Big gains", kicker="Benchmark", panels=ps,
                                      panel_labels=["25H2", "26H2"], lead="label", aspect="9:16")
         finally:
             thumb.place_panel_labels = orig
         cv = thumb.Canvas(*out.size)
+        self.assertEqual(len(boxes), 2)
         for b in boxes:
             self.assertFalse(thumb.overlaps(b, info["text_box"]), b)
             self.assertTrue(thumb.inside(b, cv.safe_box), b)
         self.assertLess(boxes[0][1], cv.safe_box[1] + cv.px(40))  # panel 1's label at the top of its panel
+        panel2_top = thumb.panel_rects(cv, 2)[0][1][1]
+        # its usual spot, near the top of the panel, is under the type...
+        self.assertTrue(info["text_box"][1] < panel2_top + cv.px(32) < info["text_box"][3])
+        self.assertGreater(boxes[1][1], info["text_box"][3])  # ...so it moved below the hook
+        self.assertLessEqual(boxes[1][3], cv.safe_box[3] - cv.px(20))  # with real room to spare
         self.assertFalse(warned(info, "no clear spot"))
+        self.assertFalse(warned(info, "safe zone"))
+        # a two-line hook plus a kicker leaves no safe spot below the type: the warning says what to cut,
+        # not "use two panels" (there are two already)
+        _, info = thumb.render(None, "GAMING", "Big gains · Or not", kicker="Benchmark", panels=ps,
+                               panel_labels=["25H2", "26H2"], lead="label", aspect="9:16")
+        self.assertTrue(warned(info, "panel 2's label has no spot clear of the type inside the Reels/Shorts "
+                                     "safe zone: shorten the type"))
+        self.assertFalse(warned(info, "use two panels"))
 
     def test_darker_shade_still_fixes_the_title_with_a_dark_accent(self):
         flat = Image.new("RGB", (1920, 1080), (245, 245, 245))
@@ -983,11 +999,11 @@ class Fonts(unittest.TestCase):
 
     def test_bundled_fonts_are_the_fallback_without_system_fonts(self):
         saved = thumb._font_index
-        thumb._font_index = {}  # a machine with no system fonts at all
+        thumb._font_index = {}  # --system-fonts on a machine with no system fonts at all
         try:
-            self.assertIn("outfit", thumb.resolve_font(thumb.LABEL_FONTS).lower())
-            self.assertIn("playfair", thumb.resolve_font(thumb.STYLES["serif"]["title"]).lower())
-            self.assertIn("outfit", thumb.resolve_font(thumb.STYLES["sans"]["title"]).lower())
+            self.assertIn("outfit", thumb.resolve_font(thumb.SYSTEM_LABEL_FONTS).lower())
+            self.assertIn("playfair", thumb.resolve_font(thumb.SYSTEM_TITLE_FONTS["serif"]).lower())
+            self.assertIn("outfit", thumb.resolve_font(thumb.SYSTEM_TITLE_FONTS["sans"]).lower())
         finally:
             thumb._font_index = saved
 
@@ -1027,10 +1043,12 @@ def eclipse(w=1920, h=1080):
 
 
 def glyph_colors(out, info, name):
-    """Median color of the solid pixels of one drawn element (by its bbox in a re-render)."""
-    x0, y0, x1, y1 = info["text_box"]
-    a = np.asarray(out.crop((x0, y0, x1, y1)), np.int32)
-    lum = a.sum(axis=2)
+    """Median color of the solid pixels of one drawn element: the brightest 3% inside its own boxes
+    (info["elements"], one per line), so the label box or another element never decides it."""
+    boxes = [b for n, b in info["elements"] if n == name]
+    assert boxes, "no %r element in %s" % (name, [n for n, _ in info["elements"]])
+    a = np.concatenate([np.asarray(out.crop(b), np.int32).reshape(-1, 3) for b in boxes])
+    lum = a.sum(axis=1)
     return np.median(a[lum >= np.percentile(lum, 97)], axis=0)
 
 
@@ -1443,6 +1461,506 @@ class Crop(unittest.TestCase):
                                ("ds2_9x16.jpg", (1080, 1920))):
                 with Image.open(os.path.join(d, name)) as im:
                     self.assertEqual(im.size, size, name)
+
+
+def face_scene(w=1620, h=1080, box=(0.30, 0.12, 0.42, 0.39)):
+    """3:2 photo: a textured "face" at box on a calm left half, and a busier (but dark) right half."""
+    img = Image.new("RGB", (w, h), (70, 64, 58))
+    img.paste(noise(w // 2, h, 20, 110), (w // 2, 0))
+    x0, y0, x1, y1 = (int(round(v)) for v in (box[0] * w, box[1] * h, box[2] * w, box[3] * h))
+    img.paste(noise(x1 - x0, y1 - y0, 90, 230), (x0, y0))
+    return img
+
+
+def busy_right(w=1920, h=1080):
+    img = Image.new("RGB", (w, h), (70, 64, 58))
+    img.paste(noise(w // 2, h, 20, 110), (w // 2, 0))
+    return img
+
+
+FACE = (0.30, 0.12, 0.42, 0.39)
+
+
+class SubjectBox(unittest.TestCase):
+    """--subject-box: a face or product label the type keeps clear of."""
+
+    def test_subject_box_is_validated(self):
+        img = noise(640, 360)
+        with self.assertRaises(Exception):
+            thumb.parse_subject_box("0.5,0,0.4,1")
+        with self.assertRaisesRegex(ValueError, "--subject-box takes"):
+            thumb.render(img, "X", subject_box=(0.5, 0, 0.4, 1), size="720p")
+        with self.assertRaisesRegex(ValueError, "--subject-box marks"):
+            thumb.render(None, "X", panels=[img, img], subject_box=FACE, size="720p")
+        with self.assertRaisesRegex(ValueError, "--subject-box marks"):
+            thumb.render(img, "X", subjects=[cutout()], subject_box=FACE, size="720p")
+        with tempfile.TemporaryDirectory() as d:
+            img.save(os.path.join(d, "cap.png"))
+            cutout().save(os.path.join(d, "me.png"))
+            code, text = run_cli(["cap.png", "--title", "X", "--subject-box", "0.5,0,0.4,1", "-o", "t"], cwd=d)
+            self.assertEqual(code, 2)
+            self.assertIn("--subject-box takes x0,y0,x1,y1", text)
+            code, text = run_cli(["cap.png", "--title", "X", "--subject", "me.png", "--subject-box", "0.3,0.1,0.4,0.4",
+                                  "-o", "t"], cwd=d)
+            self.assertEqual(code, 2)
+            self.assertIn("can't be used with --panel or --subject", text)
+            with open(os.path.join(d, "ch.json"), "w") as f:
+                json.dump({"subject_box": [0.3, 0.1, 0.4, 0.4]}, f)
+            with self.assertRaisesRegex(ValueError, "unknown keys"):  # per image, never a channel setting
+                thumb.load_channel(os.path.join(d, "ch.json"))
+            code, text = run_cli(["cap.png", "--title", "X", "--subject-box", "0.3,0.1,0.4,0.4", "--lead", "title",
+                                  "-o", "t"], cwd=d)
+            self.assertEqual(code, 0, text)
+            self.assertEqual(text.count("subject box: "), 1)  # one line per variant
+            self.assertRegex(text, r"subject box: \d+% in frame, \d+% visible, \d+% under heavy shade, \d+% under type")
+
+    def test_subject_box_remaps_like_the_inset_box(self):
+        img, top = letterboxed()
+        box = (0.30, 0.30, 0.50, 0.60)
+        for crop in (None, (0.1, 0, 0.9, 1)):
+            want = thumb.prepare_background(img, crop, box)[1]
+            self.assertEqual(want, thumb.remap_box(box, img.size, thumb.background_box(img, crop)))
+            _, info = thumb.render(img, "X", subject_box=box, crop=crop, size="720p")
+            for got, w in zip(info["subject_box"]["box"], want):
+                self.assertAlmostEqual(got, w, places=3)
+        self.assertNotAlmostEqual(want[1], box[1], places=2)  # the bars moved it
+        _, info = thumb.render(img, "X", subject_box=(0.30, 0.0, 0.50, 0.30), size="720p")
+        self.assertTrue(warned(info, "of --subject-box is cut away by --crop or the trimmed bars"), info["warnings"])
+        self.assertAlmostEqual(info["subject_box"]["box"][1], 0.0)  # clipped to the kept image
+        _, info = thumb.render(img, "X", subject_box=(0.30, 0.0, 0.50, 0.05), size="720p")
+        self.assertTrue(warned(info, "entirely cut away"), info["warnings"])
+        self.assertNotIn("subject_box", info)
+
+    def test_text_side_moves_to_keep_the_box_clear(self):
+        img = face_scene()
+        _, info = thumb.render(img, "ONE TAKE", "NO SCRIPT", size="720p")
+        self.assertEqual(info["text_side"], "left")  # busyness alone puts the type over the face
+        cv = thumb.Canvas(*info["size"])
+        mapper, vis = thumb.wide_view(img, cv, "left")
+        self.assertLess(thumb.box_cover(thumb.box_rect(FACE, mapper), cv, vis_x=vis)[1], 0.5)
+        _, info = thumb.render(img, "ONE TAKE", "NO SCRIPT", size="720p", subject_box=FACE)
+        self.assertEqual(info["text_side"], "right")
+        self.assertGreater(info["subject_box"]["visibility"], 0.9)
+        self.assertEqual(info["subject_box"]["inside"], 1.0)
+        self.assertEqual(info["warnings"], [])
+        self.assertTrue(any("clear of --subject-box" in n for n in info["notes"]))
+
+    def test_explicit_side_warns_with_a_crop_that_works(self):
+        import re
+        img = face_scene()
+        _, info = thumb.render(img, "ONE TAKE", "NO SCRIPT", size="720p", subject_box=FACE, text_side="left")
+        self.assertEqual(info["text_side"], "left")  # respected, only warned
+        w = [x for x in info["warnings"] if "darkens --subject-box" in x]
+        self.assertEqual(len(w), 1, info["warnings"])
+        m = re.search(r"--crop ([0-9.]+),([0-9.]+),([0-9.]+),([0-9.]+) --text-side (left|right)", w[0])
+        self.assertIsNotNone(m, w[0])
+        crop = tuple(float(v) for v in m.groups()[:4])
+        _, info = thumb.render(img, "ONE TAKE", "NO SCRIPT", size="720p", subject_box=FACE, text_side=m.group(5),
+                               crop=crop)
+        self.assertFalse(any("--subject-box" in x for x in info["warnings"]), info["warnings"])
+        self.assertGreaterEqual(info["subject_box"]["visibility"], 0.9)  # what the suggestion promises
+
+    def test_tall_formats_center_on_the_box(self):
+        img = busy_right()
+        box = (0.08, 0.30, 0.22, 0.55)
+        for aspect in ("9:16", "4:5"):
+            _, info = thumb.render(img, "SIMON", "No hit", aspect=aspect, subject_box=box)
+            self.assertGreaterEqual(info["subject_box"]["inside"], 0.95, aspect)
+            self.assertFalse(warned(info, "of --subject-box is"), info["warnings"])
+
+    def test_type_band_moves_to_the_top_only_when_it_clears_the_box(self):
+        img = Image.new("RGB", (1920, 1080), (70, 64, 58))
+        _, info = thumb.render(img, "SIMON", "No hit", aspect="9:16", subject_box=(0.42, 0.40, 0.58, 0.62))
+        self.assertEqual(info["text_side"], "top")
+        self.assertLess(info["subject_box"]["heavy"], 0.15)
+        self.assertFalse(warned(info, "--subject-box"), info["warnings"])
+        _, info = thumb.render(img, "SIMON", "No hit", aspect="9:16", subject_box=(0.42, 0.16, 0.58, 0.34))
+        self.assertEqual(info["text_side"], "bottom")  # a face in the top third keeps the default band
+        self.assertFalse(warned(info, "--subject-box"), info["warnings"])
+        _, info = thumb.render(img, "SIMON", "No hit", aspect="9:16")
+        self.assertEqual(info["text_side"], "bottom")
+
+    def test_warnings_for_a_box_out_of_frame_or_under_the_type(self):
+        img = busy_right()
+        _, info = thumb.render(img, "SIMON", "No hit", aspect="9:16", subject_box=(0.08, 0.30, 0.22, 0.55), focus=1.0)
+        self.assertTrue(warned(info, "of --subject-box is inside the Reels/Shorts safe zone"), info["warnings"])
+        self.assertTrue(warned(info, "--focus"), info["warnings"])
+        _, info = thumb.render(face_scene(), "ONE TAKE", "NO SCRIPT", size="720p", subject_box=(0.02, 0.35, 0.30, 0.65),
+                               text_side="left")
+        self.assertTrue(warned(info, "the type overlaps --subject-box on 16:9: use --text-side right"), info["warnings"])
+        self.assertGreater(info["subject_box"]["glyphs"], 0.02)
+
+    def test_wide_capture_puts_the_box_away_from_the_type(self):
+        img = Image.new("RGB", (2592, 1080), (70, 64, 58))
+        img.paste(noise(260, 400, 90, 230), (1166, 200))  # a face in the middle of a 2.4:1 frame
+        box = (1166 / 2592.0, 200 / 1080.0, 1426 / 2592.0, 600 / 1080.0)
+        _, info = thumb.render(img, "SIMON", "No hit", size="720p", subject_box=box, text_side="left")
+        r = info["subject_box"]["rect"]
+        self.assertGreater((r[0] + r[2]) / 2.0, 1280 * 0.6)
+        self.assertGreater(info["subject_box"]["visibility"], 0.9)
+        self.assertFalse(warned(info, "--subject-box"), info["warnings"])
+
+    def test_creator_demo_with_subject_box_in_every_format(self):
+        import re
+        photo = os.path.join(ROOT, "demo", "creator-photo.jpg")
+        if not os.path.exists(photo):
+            self.skipTest("demo files not present")
+        with tempfile.TemporaryDirectory() as d:
+            code, text = run_cli([photo, "--title", "ONE TAKE", "--label", "NO SCRIPT", "--style", "sans",
+                                  "--title-font", "outfit@Bold", "--label-font", "outfit@SemiBold",
+                                  "--subject-box", "0.30,0.12,0.42,0.39", "--aspect", "all", "-o", os.path.join(d, "c")])
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("warning:", text)  # no --crop needed: the type takes the side away from the face
+        lines = re.findall(r"subject box: (\d+)% (?:in frame|in the safe zone), (\d+)% visible", text)
+        self.assertEqual(len(lines), 6)  # A and B in three formats
+        for inside, visible in lines:
+            self.assertGreaterEqual(int(inside), 90)
+            self.assertGreaterEqual(int(visible), 90)
+
+
+def scene(w, h, box=None, bars=0, seed=0, color=(120, 140, 160)):
+    """Mid-gray noisy frame with a bright textured "face" at box (fractions) and optional 16-level pillarbox
+    bars `bars` px wide on each side."""
+    rng = np.random.default_rng(seed)
+    a = np.clip(rng.normal(0, 18, (h, w, 3)) + np.array(color), 0, 255)
+    if box:
+        x0, y0, x1, y1 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+        a[y0:y1, x0:x1] = np.clip(rng.normal(0, 60, (y1 - y0, x1 - x0, 3)) + 200, 0, 255)
+    if bars:
+        a[:, :bars] = 16
+        a[:, w - bars:] = 16
+    return Image.fromarray(a.astype(np.uint8))
+
+
+def box_warnings(info):
+    return [w for w in info["warnings"] if "--subject-box" in w]
+
+
+def crop_advice(info):
+    import re
+    for w in info["warnings"]:
+        m = re.search(r"try --crop ([0-9.,]+) --text-side (left|right)", w)
+        if m:
+            return tuple(float(v) for v in m.group(1).split(",")), m.group(2)
+    return None
+
+
+def fix_of(warning):
+    return warning.split(": ", 1)[1]
+
+
+class SubjectBoxAdvice(unittest.TestCase):
+    """The fixes the --subject-box warnings name work when followed, and agree with each other."""
+
+    def test_crop_advice_with_a_crop_follows_the_trimmed_bars(self):
+        box = (0.22, 0.25, 0.32, 0.6)
+        img = scene(1920, 1080, box=box, bars=280, seed=280)
+        _, info = thumb.render(img, "DAWN", subject_box=box, text_side="left", crop=(0.0, 0.0, 1.0, 0.98))
+        sug = crop_advice(info)
+        self.assertIsNotNone(sug, info["warnings"])
+        self.assertEqual(sug[0][1:4:2], (0.0, 0.98))  # the re-run keeps the crop's height
+        _, info = thumb.render(img, "DAWN", subject_box=box, text_side=sug[1], crop=sug[0])
+        self.assertEqual(box_warnings(info), [])  # the shade warning is gone, not the same crop again
+        self.assertGreaterEqual(info["subject_box"]["visibility"], 0.9)
+
+    def test_tall_portrait_crop_moves_the_face_above_the_band(self):
+        box = (0.3, 0.45, 0.7, 0.6)
+        img = scene(1080, 3600, box=box, seed=7)
+        _, info = thumb.render(img, "DAWN", "No hit", subject_box=box, aspect="9:16")
+        self.assertEqual(box_warnings(info), [])
+        self.assertGreaterEqual(info["subject_box"]["visibility"], 0.9)
+        self.assertGreaterEqual(info["subject_box"]["inside"], 0.9)  # inside the Reels safe zone
+        self.assertTrue(any("crop moved up or down" in n for n in info["notes"]), info["notes"])
+
+    def test_shade_and_overlap_name_one_fix_and_no_useless_side_switch(self):
+        box = (0.3, 0.1, 0.7, 0.9)  # centered: the other side is no better
+        img = scene(1920, 1080, box=box, seed=2)
+        fixes = {}
+        for side in ("auto", "right"):
+            _, info = thumb.render(img, "DAWN", subject_box=box, text_side=side, size="720p")
+            ws = box_warnings(info)
+            shade = [w for w in ws if "darkens" in w]
+            overlap = [w for w in ws if "overlaps" in w]
+            self.assertEqual(len(shade), 1, ws)
+            self.assertEqual(len(overlap), 1, ws)
+            self.assertEqual(fix_of(shade[0]).split("): ")[-1], fix_of(overlap[0]), ws)  # one consistent fix
+            self.assertNotIn("use --text-side", fix_of(overlap[0]))
+            fixes[side] = crop_advice(info)
+            self.assertIsNotNone(fixes[side], ws)
+            self.assertEqual(fixes[side][1], info["text_side"])  # the crop keeps the side, no ping-pong
+        img = scene(1920, 1080, box=(0.15, 0.1, 0.85, 0.9), seed=3)  # nothing clears it
+        _, info = thumb.render(img, "DAWN", subject_box=(0.15, 0.1, 0.85, 0.9), size="720p")
+        ws = box_warnings(info)
+        self.assertTrue(ws)
+        self.assertFalse(any("--text-side" in w for w in ws), ws)
+
+    def test_wide_capture_with_focus_gets_the_focus_fix(self):
+        import re
+        box = (0.45, 0.2, 0.55, 0.6)
+        img = scene(3840, 1080, box=box, seed=45)
+        _, info = thumb.render(img, "DAWN", subject_box=box, focus=0.5, text_side="left", size="720p")
+        w = [x for x in info["warnings"] if "darkens --subject-box" in x]
+        self.assertEqual(len(w), 1, info["warnings"])
+        m = re.search(r"drop --focus \(or set --focus ([0-9.]+)\)", w[0])
+        self.assertIsNotNone(m, w[0])
+        for focus in (float(m.group(1)), None):
+            _, info = thumb.render(img, "DAWN", subject_box=box, focus=focus, text_side="left", size="720p")
+            self.assertEqual(box_warnings(info), [], focus)
+
+    def test_inset_and_subject_box_together(self):
+        img = scene(1920, 1080, box=(0.42, 0.2, 0.55, 0.6))
+        inset = scene(800, 450, seed=9, color=(200, 60, 60))
+        ib, sb = (0.6, 0.2, 0.95, 0.7), (0.42, 0.2, 0.55, 0.6)
+        _, info = thumb.render(img, "DAWN", inset=inset, inset_box=ib, subject_box=sb, size="720p")
+        sug = crop_advice(info)
+        self.assertIsNotNone(sug, info["warnings"])
+        self.assertLessEqual(sug[0][0], ib[0])  # the crop keeps the whole inset
+        self.assertGreaterEqual(sug[0][2], ib[2])
+        _, info = thumb.render(img, "DAWN", inset=inset, inset_box=ib, subject_box=sb, crop=sug[0],
+                               text_side=sug[1], size="720p")
+        self.assertEqual(box_warnings(info), [])
+        self.assertFalse(warned(info, "inset"), info["warnings"])
+        # the inset and the face on opposite sides of the frame: no crop keeps both clear of the type
+        _, info = thumb.render(img, "DAWN", inset=inset, inset_box=(0.1, 0.2, 0.5, 0.7),
+                               subject_box=(0.6, 0.2, 0.8, 0.6), size="720p")
+        self.assertTrue(warned(info, "no --crop keeps both the inset and --subject-box"), info["warnings"])
+        self.assertIsNone(crop_advice(info))
+        # tall: the crop centers the face, not the inset, and says so
+        _, info = thumb.render(img, "DAWN", inset=inset, inset_box=(0.05, 0.2, 0.3, 0.7), subject_box=(0.7, 0.2, 0.8, 0.5),
+                               aspect="4:5")
+        self.assertTrue(any("rather than the inset" in n for n in info["notes"]), info["notes"])
+        self.assertGreaterEqual(info["subject_box"]["inside"], 0.95)
+
+    def test_band_choice_counts_the_reels_safe_zone(self):
+        box = (0.3, 0.75, 0.7, 0.9)  # too low for the safe zone with either band
+        img = scene(1080, 2400, box=box, seed=7)
+        _, info = thumb.render(img, "DAWN", "No hit", subject_box=box, aspect="9:16")
+        self.assertEqual(info["text_side"], "bottom")
+        self.assertFalse(any("type band at the top" in n for n in info["notes"]), info["notes"])
+        self.assertTrue(warned(info, "inside the Reels/Shorts safe zone"), info["warnings"])
+
+    def test_band_choice_weighs_the_middle_of_the_box(self):
+        img = Image.new("RGB", (1920, 1080), (70, 64, 58))
+        # the bottom band shades the mouth and chin, the top band only the hair: the whole box scores about
+        # the same either way, its middle (eyes to mouth) clearly better at the top
+        _, info = thumb.render(img, "SIMON", "No hit", aspect="9:16", subject_box=(0.42, 0.20, 0.58, 0.66))
+        self.assertEqual(info["text_side"], "top")
+        self.assertTrue(any("of its middle in view" in n for n in info["notes"]), info["notes"])
+
+    def test_dawnwalker_flips_and_ds2_stays(self):
+        art, logo, ds2 = (os.path.join(ROOT, "demo", n) for n in ("dawnwalker-art.jpg", "dawnwalker-logo.png",
+                                                                   "ds2-capture.jpg"))
+        if not all(os.path.exists(p) for p in (art, logo, ds2)):
+            self.skipTest("demo files not present")
+        with Image.open(art) as a, Image.open(logo) as lg:
+            a.load()
+            lg.load()
+            for lead in ("title", "label"):
+                _, info = thumb.render(a, "", "OP Skills", logo=lg, lead=lead, aspect="9:16",
+                                       subject_box=(0.40, 0.28, 0.60, 0.62))
+                self.assertEqual(info["text_side"], "top", lead)
+            _, info = thumb.render(a, "", "OP Skills", logo=lg, lead="title", aspect="9:16",
+                                   subject_box=(0.40, 0.28, 0.60, 0.62), band="bottom")
+            self.assertEqual(info["text_side"], "bottom")  # --band wins
+            self.assertTrue(warned(info, "use --band top"), info["warnings"])
+            self.assertFalse(warned(info, "--crop the capture"), info["warnings"])
+        with Image.open(ds2) as d:
+            d.load()
+            kw = dict(title="DEATH STRANDING 2", label="4K · Max settings", title_font="outfit@Light",
+                      title_tracking=0.12, focus=0.46, lead="title", subject_box=(0.43, 0.13, 0.50, 0.30))
+            for aspect in ("4:5", "9:16"):
+                _, info = thumb.render(d, aspect=aspect, **kw)
+                self.assertEqual(info["text_side"], "bottom", aspect)
+                self.assertEqual(info["warnings"], [], aspect)
+            _, info = thumb.render(d, aspect="9:16", band="top", **kw)
+            self.assertEqual(info["text_side"], "top")
+            self.assertTrue(warned(info, "use --band bottom, which keeps it clear"), info["warnings"])
+
+    def test_band_flag_is_validated_and_only_moves_tall_single_layouts(self):
+        img = half_busy(1280, 720)
+        _, info = thumb.render(img, "SIMON", "No hit", aspect="4:5", band="top")
+        self.assertEqual(info["text_side"], "top")
+        top_rows = [b[3] for n, b in info["elements"]]
+        self.assertLess(max(top_rows), info["size"][1] * 0.5)
+        a, _ = thumb.render(img, "SIMON", "No hit", band="top", size="720p")
+        b, _ = thumb.render(img, "SIMON", "No hit", size="720p")
+        self.assertEqual(a.tobytes(), b.tobytes())  # 16:9 has no band
+        _, info = thumb.render(None, "SIMON", panels=[img, img], aspect="9:16", band="top")
+        self.assertTrue(any("--band top is ignored with --panel" in n for n in info["notes"]), info["notes"])
+        with self.assertRaisesRegex(ValueError, "band must be one of"):
+            thumb.render(img, "SIMON", band="middle")
+        self.assertEqual(thumb.check_setting("band", "bottom"), "bottom")
+        with self.assertRaises(ValueError):
+            thumb.check_setting("band", "up")
+        with tempfile.TemporaryDirectory() as d:
+            img.save(os.path.join(d, "cap.png"))
+            code, text = run_cli(["cap.png", "--title", "X", "--band", "middle", "-o", "t"], cwd=d)
+            self.assertEqual(code, 2)
+            self.assertIn("must be one of auto, top, bottom", text)
+            with open(os.path.join(d, thumb.CHANNEL_FILE), "w") as f:
+                json.dump({"band": "top", "aspect": "9:16", "lead": "title"}, f)
+            code, text = run_cli(["cap.png", "--title", "X", "-o", "t"], cwd=d)
+            self.assertEqual(code, 0, text)
+            self.assertIn("type top", text)
+            code, text = run_cli(["cap.png", "--title", "X", "--band", "auto", "-o", "t"], cwd=d)
+            self.assertIn("type bottom", text)  # the flag wins over the channel file
+
+    def test_default_title_line_names_the_exact_reproduction(self):
+        img = half_busy(1280, 720)
+        a, info = thumb.render(img, "SIMON", "No hit", lead="title")
+        self.assertEqual(info["title_source"], "default serif font (bundled playfair@Bold, tracking 0.06 em)")
+        b, _ = thumb.render(img, "SIMON", "No hit", lead="title", title_font="playfair@Bold", title_tracking=0.06)
+        self.assertEqual(a.tobytes(), b.tobytes())
+
+
+class DurationBadge(unittest.TestCase):
+    """The duration badge corner comes from the badge the previews draw, and right-side type stays clear of it."""
+
+    def test_zone_is_the_badge_on_the_168px_tile(self):
+        tile = Image.new("RGB", (168, thumb.tile_height(168)), (255, 255, 255))
+        thumb.badge(tile)
+        ys, xs = np.nonzero(np.asarray(tile.convert("L")) < 128)
+        for w, h in ((1280, 720), (3840, 2160)):
+            z = thumb.Canvas(w, h).timestamp_zone
+            self.assertLessEqual(z[0], xs.min() / 168.0 * w)  # every badge pixel is inside the zone
+            self.assertLessEqual(z[1], ys.min() / float(tile.height) * h)
+            self.assertEqual(z[2:], (w, h))
+        x0, y0, _, _ = thumb.badge_rect(168, thumb.tile_height(168))
+        self.assertEqual(thumb.Canvas(1280, 720).timestamp_zone[:2],
+                         (int(1280 * int(x0) / 168), int(720 * int(y0) / thumb.tile_height(168))))
+        self.assertEqual(thumb.Canvas(1080, 1920).timestamp_zone, (0, 0, 0, 0))
+
+    def test_right_side_type_keeps_clear_of_the_badge_at_168px_and_up(self):
+        out, info = thumb.render(half_busy(busy="left"), "ONE\\nTWO\\nSIX", "No hit", kicker="Expedition 33",
+                                 subtitle="The long night", text_side="right", size="720p")
+        self.assertEqual(info["text_side"], "right")
+        bottom = max(b[3] for _, b in info["elements"])
+        self.assertGreater(bottom, 720 * 0.70)  # tall enough to reach the limit
+        for w in (168, 320, 480):
+            h = thumb.tile_height(w)
+            badge = thumb.badge_rect(w, h)
+            for name, b in info["elements"]:
+                scaled = tuple(v * w / 1280.0 for v in b)
+                self.assertFalse(thumb.overlaps(scaled, badge), (w, name, scaled, badge))
+        self.assertFalse(warned(info, "duration badge"), info["warnings"])
+
+    def test_small_preview_text_keeps_its_word_spaces(self):
+        gap = thumb.preview_text_width("squint test", 13) - thumb.preview_text_width("squinttest", 13)
+        self.assertGreaterEqual(gap, 3.9)  # Outfit's narrow space (2.5 px at 13 px) plus the tracking
+        m, dx, base = thumb.preview_text_mask("24:13", 12)
+        self.assertGreater(np.asarray(m).max(), 200)
+        self.assertLess(abs(m.getbbox()[2] - dx - thumb.preview_text_width("24:13", 12)), 3)
+
+
+class SystemFonts(unittest.TestCase):
+    """Bundled fonts by default, the machine's own only with --system-fonts. A fake system index holds
+    copies of bundled files under the names of Office's Bodoni MT and Windows' Bahnschrift."""
+
+    def setUp(self):
+        import shutil
+        self.tmp = tempfile.mkdtemp()
+        self.bodoni = os.path.join(self.tmp, "BOD_R.TTF")
+        self.bahn = os.path.join(self.tmp, "bahnschrift.ttf")
+        shutil.copy(os.path.join(thumb.FONT_ROOT, "slab", "ZillaSlab-Bold.ttf"), self.bodoni)
+        shutil.copy(os.path.join(thumb.FONT_ROOT, "oswald", "Oswald[wght].ttf"), self.bahn)  # has SemiBold, Bold
+        self.saved = thumb._font_index
+        thumb._font_index = {"bod_r.ttf": self.bodoni, "bahnschrift.ttf": self.bahn}
+
+    def tearDown(self):
+        import shutil
+        thumb._font_index = self.saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def bundled(self, spec):
+        folder = os.path.dirname(os.path.dirname(spec.partition("@")[0]))
+        return os.path.normcase(folder) == os.path.normcase(thumb.FONT_ROOT)
+
+    def test_default_is_bundled_even_with_bodoni_and_bahnschrift_installed(self):
+        _, info = thumb.render(half_busy(), "SIMON", "Parry only", lead="title")
+        title, label = info["fonts"]
+        self.assertTrue(self.bundled(title) and self.bundled(label), info["fonts"])
+        self.assertIn("PlayfairDisplay", title)
+        self.assertTrue(title.endswith("@Bold"), title)
+        self.assertIn("Outfit", label)
+        self.assertTrue(label.endswith("@SemiBold"), label)
+        # the exact reproduction: --title-font playfair@Bold alone takes the catalog's 0.04 em
+        self.assertEqual(info["title_source"], "default serif font (bundled playfair@Bold, tracking 0.06 em)")
+        _, info = thumb.render(half_busy(), "SIMON", "Parry only", style="sans", lead="title")
+        self.assertEqual(info["title_source"], "default sans font (bundled outfit@Bold)")  # catalog tracking matches
+        self.assertIn("Outfit", info["fonts"][0])
+        self.assertTrue(info["fonts"][0].endswith("@Bold"))
+
+    def test_system_fonts_pick_the_installed_faces(self):
+        _, info = thumb.render(half_busy(), "SIMON", "Parry only", lead="title", system_fonts=True)
+        self.assertEqual(info["fonts"], (self.bodoni, self.bahn + "@SemiBold"))
+        self.assertEqual(info["title_source"], "default serif font (BOD_R.TTF)")
+        _, info = thumb.render(half_busy(), "SIMON", "Parry only", style="sans", lead="title", system_fonts=True)
+        self.assertEqual(info["fonts"][0], self.bahn + "@Bold")
+        # a named font still wins over either chain
+        _, info = thumb.render(half_busy(), "SIMON", "Parry only", title_font="cinzel", label_font="outfit@Bold",
+                               lead="title", system_fonts=True)
+        self.assertIn("Cinzel", info["fonts"][0])
+        self.assertTrue(info["fonts"][1].endswith("Outfit[wght].ttf@Bold"), info["fonts"][1])
+
+    def test_cli_flag_and_channel_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "cap.png")
+            half_busy(1280, 720).save(src)
+            code, text = run_cli([src, "--title", "SIMON", "-o", os.path.join(d, "a")])
+            self.assertEqual(code, 0, text)
+            self.assertNotIn("BOD_R", text)
+            self.assertNotIn("(system fonts)", text)
+            code, text = run_cli([src, "--title", "SIMON", "--system-fonts", "-o", os.path.join(d, "b")])
+            self.assertEqual(code, 0, text)
+            self.assertIn("fonts: title %s; label %s@SemiBold (system fonts)" % (self.bodoni, self.bahn), text)
+            with open(os.path.join(d, thumb.CHANNEL_FILE), "w") as f:
+                json.dump({"system_fonts": True}, f)
+            code, text = run_cli(["cap.png", "--title", "SIMON", "-o", "c"], cwd=d)
+            self.assertEqual(code, 0, text)
+            self.assertIn("title type: default serif font (BOD_R.TTF)", text)
+            self.assertIn("(system fonts)", text)
+
+    def test_system_fonts_must_be_a_bool(self):
+        self.assertIs(thumb.check_setting("system_fonts", True), True)
+        for bad in ("yes", "true", 1):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                thumb.check_setting("system_fonts", bad)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.json")
+            with open(path, "w") as f:
+                json.dump({"system_fonts": "yes"}, f)
+            with self.assertRaises(ValueError):
+                thumb.load_channel(path)
+
+    def test_previews_use_the_bundled_label_font_even_with_system_fonts(self):
+        used, in_export = [], [False]
+        real_load, real_export = thumb.load_font, thumb.export
+
+        def load(spec, size):
+            if in_export[0]:
+                used.append(spec)
+            return real_load(spec, size)
+
+        def export(*a, **k):
+            in_export[0] = True
+            try:
+                return real_export(*a, **k)
+            finally:
+                in_export[0] = False
+        thumb.load_font, thumb.export = load, export
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                src = os.path.join(d, "cap.png")
+                half_busy(1280, 720).save(src)
+                code, text = run_cli([src, "--title", "SIMON", "--label", "No hit", "--system-fonts", "--aspect",
+                                      "all", "-o", os.path.join(d, "t")])
+        finally:
+            thumb.load_font, thumb.export = real_load, real_export
+        self.assertEqual(code, 0, text)
+        self.assertIn("BOD_R.TTF", text)  # the thumbnails themselves used the system faces
+        self.assertTrue(used)  # badge and captions on all three kinds of sheet
+        for spec in used:
+            self.assertTrue(self.bundled(spec) and "Outfit" in spec and spec.endswith("@SemiBold"), spec)
 
 
 if __name__ == "__main__":
