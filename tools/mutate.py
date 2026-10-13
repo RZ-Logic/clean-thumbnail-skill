@@ -169,6 +169,8 @@ MUTANTS = [
      "DurationBadge.test_right_side_type_keeps_clear_of_the_badge_at_168px_and_up"),
     ("small preview text untracked", "PREVIEW_TRACKING = 0.03", "PREVIEW_TRACKING = 0.0",
      "DurationBadge.test_small_preview_text_keeps_its_word_spaces"),
+    ("caption word space ignored", "            a = max(a, space)", "            pass",
+     "DurationBadge.test_small_preview_text_keeps_its_word_spaces"),
 ]
 
 

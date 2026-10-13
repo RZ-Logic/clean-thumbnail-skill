@@ -1031,6 +1031,9 @@ class Fonts(unittest.TestCase):
             self.assertIn("clean-thumbnail/fonts/" + e["file"], names)
             self.assertIn("clean-thumbnail/fonts/%s/OFL.txt" % os.path.dirname(e["file"]), names)
         self.assertIn("clean-thumbnail/fonts/catalog.json", names)
+        import re
+        unsafe = [n for n in names if not re.fullmatch(r"[A-Za-z0-9._/-]+", n)]
+        self.assertEqual(unsafe, [])  # claude.ai refuses a zip with "[wght]" or similar in any path
 
 
 def eclipse(w=1920, h=1080):
@@ -1456,7 +1459,7 @@ class Crop(unittest.TestCase):
             self.assertEqual(code, 0, text)
             self.assertNotIn("warning:", text)
             self.assertIn("title type: bundled font outfit (Outfit, geometric modern sans), tracking 0.12 em", text)
-            self.assertIn("Outfit[wght].ttf@Light", text)
+            self.assertIn("Outfit-VariableFont_wght.ttf@Light", text)
             for name, size in (("ds2_4x5.jpg", (1440, 1800)), ("ds2_4x5_1080.jpg", (1080, 1350)),
                                ("ds2_9x16.jpg", (1080, 1920))):
                 with Image.open(os.path.join(d, name)) as im:
@@ -1846,7 +1849,16 @@ class DurationBadge(unittest.TestCase):
 
     def test_small_preview_text_keeps_its_word_spaces(self):
         gap = thumb.preview_text_width("squint test", 13) - thumb.preview_text_width("squinttest", 13)
-        self.assertGreaterEqual(gap, 3.9)  # Outfit's narrow space (2.5 px at 13 px) plus the tracking
+        # Outfit's own space is 2.5 px at 13 px; the preview minimum holds with or without raqm kerning
+        self.assertGreaterEqual(gap, thumb.PREVIEW_WORD_SPACE * 13 - 0.01)
+        from PIL import ImageFont
+        basic = ImageFont.truetype(thumb.bundled_spec("outfit").partition("@")[0], 39,
+                                   layout_engine=ImageFont.Layout.BASIC)  # how macOS CI's Pillow lays text out
+        gap_basic = thumb.text_width(basic, "squint test", 0.03 * 39, 0.3 * 39) - thumb.text_width(basic, "squinttest", 0.03 * 39, 0.3 * 39)
+        self.assertGreaterEqual(gap_basic, 0.3 * 39 - 0.01)
+        tracked = thumb.preview_text_width("24:13", 12)
+        plain = thumb.text_width(thumb.preview_font(36), "24:13", 0) / 3
+        self.assertGreater(tracked - plain, 1.0)  # the badge figures and colon get air at 12 px
         m, dx, base = thumb.preview_text_mask("24:13", 12)
         self.assertGreater(np.asarray(m).max(), 200)
         self.assertLess(abs(m.getbbox()[2] - dx - thumb.preview_text_width("24:13", 12)), 3)
@@ -1862,7 +1874,7 @@ class SystemFonts(unittest.TestCase):
         self.bodoni = os.path.join(self.tmp, "BOD_R.TTF")
         self.bahn = os.path.join(self.tmp, "bahnschrift.ttf")
         shutil.copy(os.path.join(thumb.FONT_ROOT, "slab", "ZillaSlab-Bold.ttf"), self.bodoni)
-        shutil.copy(os.path.join(thumb.FONT_ROOT, "oswald", "Oswald[wght].ttf"), self.bahn)  # has SemiBold, Bold
+        shutil.copy(os.path.join(thumb.FONT_ROOT, "oswald", "Oswald-VariableFont_wght.ttf"), self.bahn)  # has SemiBold, Bold
         self.saved = thumb._font_index
         thumb._font_index = {"bod_r.ttf": self.bodoni, "bahnschrift.ttf": self.bahn}
 
@@ -1900,7 +1912,7 @@ class SystemFonts(unittest.TestCase):
         _, info = thumb.render(half_busy(), "SIMON", "Parry only", title_font="cinzel", label_font="outfit@Bold",
                                lead="title", system_fonts=True)
         self.assertIn("Cinzel", info["fonts"][0])
-        self.assertTrue(info["fonts"][1].endswith("Outfit[wght].ttf@Bold"), info["fonts"][1])
+        self.assertTrue(info["fonts"][1].endswith("Outfit-VariableFont_wght.ttf@Bold"), info["fonts"][1])
 
     def test_cli_flag_and_channel_key(self):
         with tempfile.TemporaryDirectory() as d:

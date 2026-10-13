@@ -39,7 +39,7 @@ import sys
 import numpy as np
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFile, ImageFilter, ImageFont, ImageOps
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 SIZES = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440), "4k": (3840, 2160)}
 PHONE_SIZE = (1280, 720)
@@ -1129,8 +1129,9 @@ def _fkw(font):
     return {"features": LAYOUT_FEATURES} if LAYOUT_FEATURES and raqm else {}
 
 
-def _advances(font, text, tracking):
-    """Per-character advance for tracked text, keeping each pair's kerning (AV, TO, YO)."""
+def _advances(font, text, tracking, space=0.0):
+    """Per-character advance for tracked text, keeping each pair's kerning (AV, TO, YO). `space` is a
+    minimum advance for a word space (preview captions: some fonts' spaces vanish at 12 px)."""
     kw = _fkw(font)
     w = [font.getlength(c, **kw) for c in text]
     out = []
@@ -1138,23 +1139,25 @@ def _advances(font, text, tracking):
         a = w[i]
         if i + 1 < len(text):
             a += tracking + font.getlength(text[i:i + 2], **kw) - w[i] - w[i + 1]
+        if text[i] == " ":
+            a = max(a, space)
         out.append(a)
     return out
 
 
-def text_width(font, text, tracking):
+def text_width(font, text, tracking, space=0.0):
     if not text:
         return 0.0
-    if tracking:
-        return sum(_advances(font, text, tracking))
+    if tracking or space:
+        return sum(_advances(font, text, tracking, space))
     return font.getlength(text, **_fkw(font))
 
 
-def draw_text(draw, x, baseline, text, font, tracking, fill):
-    if not tracking:
+def draw_text(draw, x, baseline, text, font, tracking, fill, space=0.0):
+    if not tracking and not space:
         draw.text((x, baseline), text, font=font, fill=fill, anchor="ls", **_fkw(font))
         return
-    for c, a in zip(text, _advances(font, text, tracking)):
+    for c, a in zip(text, _advances(font, text, tracking, space)):
         draw.text((x, baseline), c, font=font, fill=fill, anchor="ls", **_fkw(font))
         x += a
 
@@ -2366,6 +2369,7 @@ def preview_font(size):
 
 PREVIEW_SUPERSAMPLE = 3  # small preview text is drawn this much larger and scaled down: even spacing at 12-13 px
 PREVIEW_TRACKING = 0.03  # em, so words and figures of the small text don't run together
+PREVIEW_WORD_SPACE = 0.3  # em, minimum word space: Outfit's own is 0.19 em, and without raqm no kerning helps
 # YouTube's duration badge as the previews draw it: fixed px whatever the tile size. Canvas.timestamp_zone
 # is this badge on the smallest tile type stays clear of (the 168 px "up next" tile).
 BADGE = {"text": "24:13", "size": 12, "pad": 4, "height": 17, "inset": 4, "radius": 4, "tile": 168}
@@ -2381,21 +2385,21 @@ def preview_text_mask(text, size):
     PREVIEW_TRACKING and scaled down with LANCZOS."""
     k = PREVIEW_SUPERSAMPLE
     f = preview_font(size * k)
-    trk = PREVIEW_TRACKING * size * k
+    trk, gap = PREVIEW_TRACKING * size * k, PREVIEW_WORD_SPACE * size * k
     asc, desc = f.getmetrics() if hasattr(f, "getmetrics") else (size * k, size * k // 3)
     top = (-asc) % k + k  # the baseline lands on a whole pixel after scaling down
-    w = int(text_width(f, text, trk)) + 4 * k
+    w = int(text_width(f, text, trk, gap)) + 4 * k
     h = top + asc + desc + k
     w, h = w + (-w) % k, h + (-h) % k
     m = Image.new("L", (w, h), 0)
-    draw_text(ImageDraw.Draw(m), 2 * k, top + asc, text, f, trk, 255)
+    draw_text(ImageDraw.Draw(m), 2 * k, top + asc, text, f, trk, 255, gap)
     return m.resize((w // k, h // k), Image.LANCZOS), 2, (top + asc) // k
 
 
 def preview_text_width(text, size):
     """Advance width of preview text at 1x, as preview_text draws it."""
     k = PREVIEW_SUPERSAMPLE
-    return text_width(preview_font(size * k), text, PREVIEW_TRACKING * size * k) / k
+    return text_width(preview_font(size * k), text, PREVIEW_TRACKING * size * k, PREVIEW_WORD_SPACE * size * k) / k
 
 
 def preview_text(img, x, baseline, text, size, fill):
