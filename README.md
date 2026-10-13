@@ -1,0 +1,304 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="Clean Thumbnail: one frame, quiet type" width="100%"/>
+</p>
+
+<h1 align="center">Clean Thumbnail</h1>
+
+<p align="center">
+  <strong>Real images. Quiet type. A thumbnail that reads in the feed.</strong><br/>
+  An Agent Skill and local renderer for restrained YouTube thumbnails, for any kind of video,<br/>
+  with Facebook feed and Reels/Shorts versions from the same images and text.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="MIT license"/></a>
+  <img src="https://img.shields.io/badge/Master-up_to_3840%C3%972160-39424E?style=for-the-badge" alt="Master up to 3840 by 2160"/>
+  <img src="https://img.shields.io/badge/Phone_copy-under_2_MB-2A9D4A?style=for-the-badge" alt="Phone copy under 2 MB"/>
+  <img src="https://img.shields.io/badge/Formats-16%3A9_%C2%B7_4%3A5_%C2%B7_9%3A16-7A4FB5?style=for-the-badge" alt="Formats 16:9, 4:5 and 9:16"/>
+  <img src="https://img.shields.io/badge/Local-Python_3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Local Python 3.8 or newer"/>
+</p>
+
+<p align="center">
+  <a href="#why-this-exists">Why</a> ·
+  <a href="#the-principle">Principle</a> ·
+  <a href="#example">Example</a> ·
+  <a href="#creator-photo">Creator Photo</a> ·
+  <a href="#subject-demo">Subject Layer</a> ·
+  <a href="#image-roles">Image Roles</a> ·
+  <a href="#formats">Formats</a> ·
+  <a href="#title-look">Title Look</a> ·
+  <a href="#what-ships">What Ships</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#quality-gates">Quality Gates</a> ·
+  <a href="#tradeoffs">Tradeoffs</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#verification">Verification</a>
+</p>
+
+---
+
+<a id="why-this-exists"></a>
+## 🧭 Why this exists
+
+Many thumbnails, in gaming, tech, sports and self-help alike, use the same recipe: a cut-out with a glowing edge, a synthetic explosion, oversized distressed lettering, arrows, and one color pushed across the entire frame. Grain on top does not make that scene less manufactured. The lettering and the effects are the problem before any finishing pass begins.
+
+Clean Thumbnail starts from real images: a game capture, a photo, official art, a cut-out of the creator. It gives them space to carry the mood, then typesets the few words a viewer can actually read in a feed. The renderer is deterministic: it does not generate a new world behind anyone or ask an image model to draw letters.
+
+It suits gameplay, trailers, walkthroughs, hardware and settings comparisons, sports, education and vlogs, whenever you have images that represent the video. It cannot make a weak image compelling by itself.
+
+<a id="the-principle"></a>
+## 🧱 The principle
+
+> **Real images carry the mood; the type stays quiet.**
+
+The skill decides *what to say* from the video title: the big type is whatever makes this video different from every other video about the same thing. The Python script decides *where and how to render it*. Keeping text out of image generation makes spelling, spacing, and revisions controllable.
+
+```text
+Video title ─► what makes it different + context ─────────────┐
+                                                               ├─► A/B pair: master (up to 4K)
+Images ─► roles: background, panels, subject, inset ─► type ───┘    + 2 MB phone copy + previews
+```
+
+<a id="example"></a>
+## 🖼️ One title, two variants
+
+For a video titled *Clair Obscur Expedition 33 GOTY - Simon Fight (No hit - Only Parry) | Expert*, the subject is **SIMON** and the hook is **NO HIT · PARRY ONLY**. Which one should be big depends on the audience, so the renderer makes both: A with the subject big, B with the hook big, for YouTube's Test & Compare.
+
+<p align="center">
+  <img src="demo/simon_A.jpg" alt="Variant A: SIMON in large serif type with a boxed NO HIT · PARRY ONLY label, game art on the right" width="49%"/>
+  <img src="demo/simon_B.jpg" alt="Variant B: NO HIT over PARRY ONLY in large serif type with a boxed SIMON label, game art on the right" width="49%"/>
+</p>
+
+The [source capture](demo/simon-capture.jpg) and the preview sheets for [A](demo/simon_A_preview.png) and [B](demo/simon_B_preview.png) are included. Each preview shows the thumbnail at 480, 320, 168, and 120 px in dark and light feed settings with a duration badge, at the 88 px notification size, and as a squint test (grayscale plus blur) that shows what survives a fast scroll. The tool does not predict which variant will perform better.
+
+### With the official logo
+
+For a *The Blood of Dawnwalker* video with the hook **OP SKILLS**, the game's official logo replaces the title text. A puts the logo first; B sets the hook big with the logo small above it. The key art has the character in the middle of the frame, so `--crop` keeps 78% of its width around him. Narrower than 16:9, the art moves to the right and fades into the dark side, which leaves the left for the type.
+
+<p align="center">
+  <img src="demo/dawnwalker_A.jpg" alt="Variant A: The Blood of Dawnwalker logo over a boxed OP SKILLS label on the dark left side, the character and an orange eclipse on the right" width="49%"/>
+  <img src="demo/dawnwalker_B.jpg" alt="Variant B: OP over SKILLS in large serif type with the logo small above it, the character and the eclipse on the right" width="49%"/>
+</p>
+
+```bash
+python skill/clean-thumbnail/scripts/thumb.py demo/dawnwalker-art.jpg --crop 0.117,0,0.898,1 --text-side left --logo demo/dawnwalker-logo.png --label "OP Skills" -o out/dawnwalker
+```
+
+The [key art](demo/dawnwalker-art.jpg) is 2560×1440, so both masters render at 2560×1440 without upscaling. The previews show the trade the pair is for: in [A](demo/dawnwalker_A_preview.png) the logo's thin gold lettering fades at 168 px and in the squint test, while the hook in [B](demo/dawnwalker_B_preview.png) holds. The logo is the more recognizable mark; the hook is the more legible one.
+
+<a id="creator-photo"></a>
+### With a creator photo
+
+For a fictional vlog titled *One take, no script: just press record*, the thumbnail copy is **ONE TAKE / NO SCRIPT**. A leads with the recording constraint; B leads with the unscripted approach. A stock model stands in for the creator in this example.
+
+<p align="center">
+  <img src="demo/creator_A.jpg" alt="Variant A: ONE TAKE in large white sans type with a boxed NO SCRIPT label on the dark left side; on the right a creator sits at home in front of a phone on a gimbal whose screen shows him recording" width="49%"/>
+  <img src="demo/creator_B.jpg" alt="Variant B: the same photo with NO SCRIPT in large white sans type and a boxed ONE TAKE label on the dark left side" width="49%"/>
+</p>
+
+The [source photo](demo/creator-photo.jpg) is by [Ron Lach on Pexels](https://www.pexels.com/photo/a-man-creating-video-content-8360444/), used under the [Pexels License](https://www.pexels.com/license/). The photo is the background as it is; it needs no separate cut-out. The creator sits in the middle with the camera phone on the right, so `--crop 0.2,0,0.85,1` keeps the part from the creator to the phone, the art moves right, and the type takes the dark left side. Both the creator and the phone screen showing him recording stay visible, which is what says "creator video". `--feather 0.2` shortens the fade so it doesn't reach his face. With no brand logo to match, both slots use the bundled Outfit family: Bold for the headline and SemiBold for the box, where Outfit stands in for a channel font. Naming bundled fonts makes the thumbnails the same on every system (the preview captions still use system fonts).
+
+```bash
+python skill/clean-thumbnail/scripts/thumb.py demo/creator-photo.jpg --title "ONE TAKE" --label "NO SCRIPT" --style sans --title-font outfit@Bold --label-font outfit@SemiBold --text-side left --crop 0.2,0,0.85,1 --feather 0.2 --aspect 16:9 -o out/creator
+```
+
+The included source is resized to 3840×2560; the crop keeps 2496×2560 of it, and both masters render at 3840×2160 without upscaling. The [A preview](demo/creator_A_preview.png) and [B preview](demo/creator_B_preview.png) show the headlines at 168 px and in the squint test. The 1280×720 phone copies for [A](demo/creator_A_phone.jpg) and [B](demo/creator_B_phone.jpg) are under 2 MB. Source and derivative credits are recorded in [the photo license note](demo/creator-photo-LICENSE.md); the fictional copy does not describe the model's own video or imply an endorsement.
+
+<a id="subject-demo"></a>
+### A cut-out over a separate background
+
+For a fictional *A home studio in a small room* video, the copy is **HOME STUDIO / SMALL ROOM**. This example uses two photographs: a [transparent person](demo/subject-person.png) cut out from the Ron Lach creator photo, placed over a separate [room photo](demo/subject-room.jpg) by [Curtis Adams](https://www.pexels.com/photo/indoor-view-of-office-room-with-desk-and-laptop-at-home-11125425/). The stock model stands in for a creator; the room is an example setting.
+
+<p align="center">
+  <img src="demo/subject_A.jpg" alt="Variant A: a person cut out and placed on the left of a separate photo of a blue room, with HOME STUDIO in large white type and a boxed SMALL ROOM label on the right" width="49%"/>
+  <img src="demo/subject_B.jpg" alt="Variant B: the same composite with SMALL ROOM in large white type and a boxed HOME STUDIO label" width="49%"/>
+</p>
+
+```bash
+python skill/clean-thumbnail/scripts/thumb.py demo/subject-room.jpg --subject demo/subject-person.png --title "HOME STUDIO" --label "SMALL ROOM" --style sans --title-font outfit@Bold --label-font outfit@SemiBold --text-side right --push 0.35 --aspect 16:9 -o out/subject
+```
+
+`--subject` places the person on the left, away from the type, and `--push 0.35` softens the room behind him. The renderer matches the cut-out's color cast, black and white points, sharpness and grain to the background. Both slots use bundled Outfit in white, standing in for a channel font. The transparent PNG is included, so this command needs only NumPy and Pillow; background removal was a one-time preparation step.
+
+The 4000×2250 room crop is scaled 0.96× and the 1924×2328 cut-out about 0.87×, so neither is upscaled for the 3840×2160 masters. The cut-out's hair edge was cleaned against the original wall and a patch of the original sofa seen through his arm was removed; [the preparation note](demo/subject-LICENSE.md) describes how. The [A preview](demo/subject_A_preview.png) and [B preview](demo/subject_B_preview.png) show the headline and person at feed sizes; the [A phone copy](demo/subject_A_phone.jpg) and [B phone copy](demo/subject_B_phone.jpg) are 1280×720 and under 2 MB. The run reports 14.5:1 and 14.8:1 text contrast with no warnings. Both source photos and the derivatives use the Pexels License; [the source and preparation note](demo/subject-LICENSE.md) records the credits.
+
+<a id="image-roles"></a>
+## 🧩 Image roles
+
+Every thumbnail is a small stack of real images in fixed roles, plus the type. New topics need no new layouts.
+
+| Role | Flag | Use it for |
+|---|---|---|
+| Background | the capture | One frame, photo, or key art. The type goes on its calmer side over a shade built from its own shadow color. When the subject sits in the middle, `--crop` narrows the art so it moves to the far side. |
+| Panels | `--panel A --panel B` | Comparisons: versions, settings, before and after. A thin divider, a label per panel, the type in a band at the bottom. |
+| Subject | `--subject cutout.png` | A person, character, or product in front of the background, on the side away from the type. |
+| Inset | `--inset img --inset-box x0,y0,x1,y1` | An image inside the background, like a game frame on a monitor. |
+
+Subjects and insets are matched to the photo behind them: color cast, black and white points, sharpness, and grain, so the stack reads as one photograph. There are no white keylines, glows, or halos. Subjects need a transparent background; with [rembg](https://github.com/danielgatis/rembg) installed, the script removes it for you.
+
+<a id="formats"></a>
+## 📐 Formats
+
+The same images and text render for YouTube and for Facebook, Instagram, Reels, Shorts, and Stories.
+
+| Format | Flag | Master | Copy | Where the type goes |
+|---|---|---|---|---|
+| YouTube 16:9 | default | up to 3840×2160 | 1280×720, under 2 MB | Beside the image, clear of the duration badge |
+| Feed 4:5 | `--aspect 4:5` | up to 2160×2700 | 1080×1350 | Below the image; above it when there is a subject |
+| Reels and Shorts 9:16 | `--aspect 9:16` | up to 2160×3840 | 1080×1920 | Inside the safe zone: clear of the top 14%, bottom 35%, and right 15% |
+
+Vertical formats crop to the busiest part of the image, which is usually the subject, unless you set `--focus`. Comparisons stack, with the type on the seam so both panels stay visible. `--aspect all` renders every format. Each gets its own preview: a Facebook-style feed card, or a Reels-style overlay with the profile-grid crop.
+
+Through the skill, you choose formats once. The first time, it asks which platforms you post to and saves the answer as `"aspect"` in `clean-thumbnail.json`; after that it renders those formats without asking. Naming a platform in a request ("make a Reels one too") adds that format for that request only. Run directly without a saved setting, the script renders 16:9 and prints a note saying so.
+
+<p align="center">
+  <img src="demo/ds2_4x5.jpg" alt="4:5 feed version: Sam seated in a dim green cabin, face lit in the upper half, DEATH STRANDING 2 and a boxed 4K · MAX SETTINGS label in the dark band at the bottom" width="32%"/>
+  <img src="demo/ds2_9x16.jpg" alt="9:16 Reels version: Sam's face in the top third, DEATH STRANDING 2 and the boxed label mid-frame over his torso, above the caption area" width="27%"/>
+</p>
+
+These come from the author's own 4K capture of *Death Stranding 2* (the [source](demo/ds2-capture.jpg)), with the title in the bundled `outfit` font at Light weight and wide spacing, like the game's thin, spaced-out logo:
+
+```bash
+python skill/clean-thumbnail/scripts/thumb.py demo/ds2-capture.jpg --title "DEATH STRANDING 2" --label "4K · Max settings" --title-font outfit@Light --title-tracking 0.12 --focus 0.46 --lead title --aspect 4:5,9:16 -o out/ds2
+```
+
+The [4:5 preview](demo/ds2_4x5_preview.png) shows it in a Facebook feed card and the [9:16 preview](demo/ds2_9x16_preview.png) under a Reels overlay with the profile-grid crop. A wide frame doesn't always suit the vertical formats, so they can come from a second capture and a second run. The safe zone holds 9:16 type mid-frame, so the face has to sit in the top third, as Sam's does here; the centered Dawnwalker key art above would have its face shaded on 9:16, and `--crop` can't move the type on this format. `--focus 0.46` centers Sam: on its own the crop follows the busiest part of the frame, which in this cabin is the equipment on the wall.
+
+<a id="title-look"></a>
+## 🔤 Title look and color
+
+The big type should look like the thing in the video, not like every other thumbnail. The skill picks the look in this order:
+
+1. **The official logo** (`--logo`), from the press kit or the official site, as in the [Dawnwalker example](#example). The most authentic option, and what publisher thumbnails use.
+2. **The closest bundled font** (`--title-font cinzel`): 16 open-licensed display faces, from Roman capitals and blackletter to stencil and pixel, matched to the logo with a [decision table](skill/clean-thumbnail/references/fonts.md), in weight and letter spacing as well as shape (`outfit@Light --title-tracking 0.12` for Death Stranding's thin, spaced-out logo). Close in spirit, not the real lettering.
+3. **The channel's own font**, when nothing bundled fits. A wrong match looks worse than a neutral one.
+
+The label box always keeps the channel font, so every thumbnail looks like its game and the channel still looks like one channel.
+
+Color follows the same restraint: **white by default, one color at most.** `--title-color auto` takes the color the image is known for (an eclipse, a sunset, neon, a team kit) and lightens it only as much as it needs to pass 4.5:1 on the dark side. Gray scenes and skin tones don't count, so those stay white. A brand hex code works too. Color the big type or the label box, not both.
+
+<p align="center">
+  <img src="demo/simon_A.jpg" alt="SIMON in white serif type over the dark side of the game art" width="49%"/>
+  <img src="demo/simon_A_color.jpg" alt="The same thumbnail with SIMON in a muted bronze taken from the gold of the game art" width="49%"/>
+</p>
+
+White (left) and `--title-color auto` (right): the art's gold `#a7753d` is lightened to `#ae7f4c` so it reads at 5.3:1. Every variant prints the look and colors it used.
+
+<a id="what-ships"></a>
+## 📦 What ships
+
+| Part | Role |
+|---|---|
+| [Skill instructions](skill/clean-thumbnail/SKILL.md) | Assigns image roles, derives short text, renders the A/B pair, and reviews the result. |
+| [Type rules](skill/clean-thumbnail/references/type-rules.md) | Turns any video title into a subject and a hook, with examples across topics. |
+| [Channel settings example](skill/clean-thumbnail/references/channel.example.json) | Style, fonts, title and label colors, lead, size, and formats saved once for every video. |
+| [Bundled fonts](skill/clean-thumbnail/fonts/) and [matching guide](skill/clean-thumbnail/references/fonts.md) | 16 open-licensed display fonts (Roman capitals to pixel) so the big type can look like the game, film, or brand. |
+| [`thumb.py`](skill/clean-thumbnail/scripts/thumb.py) | Composes, matches layers, typesets, checks, and exports. |
+| [Demo](demo/) | Five worked examples (Simon; Dawnwalker with its logo; a creator photo; a cut-out over a separate room; a Death Stranding 2 capture for 4:5 and 9:16): source images, A/B variants, vertical formats, and feed-size previews. |
+| [Tests](tests/) | Resolution, layout, lead, image roles, layer matching, contrast, formats, cropping, fonts, colors, channel settings, and the CLI. |
+
+The renderer runs locally with NumPy and Pillow. No image-generation service is in the rendering path.
+
+<a id="quickstart"></a>
+## ⚡ Quickstart
+
+Try the included demo from this repository:
+
+```bash
+python -m pip install numpy pillow
+python skill/clean-thumbnail/scripts/thumb.py demo/simon-capture.jpg --title "SIMON" --label "No hit · Parry only" -o out/simon
+```
+
+This writes `simon_A.jpg` and `simon_B.jpg` (masters), `_phone.jpg` copies for phone upload, and a `_preview.png` for each. The bundled capture is 637×358 with pillarbox bars around 358×358 art, so after trimming the bars the renderer correctly warns that it upscales about 2×; it demonstrates layout rather than production sharpness. The [Dawnwalker example](#example) starts from a 2560×1440 source and renders without upscaling.
+
+For your own video, use a clean, high-resolution image with room for type on one side. The master comes out at the largest standard size your images support without upscaling, up to 3840×2160. Official press-kit art can work; publish only images you have the right to use. If the frame is crowded, choose another moment before tuning the layout.
+
+```bash
+# comparison
+python skill/clean-thumbnail/scripts/thumb.py --panel 25h2.png --panel 26h2.png --panel-label 25H2 --panel-label 26H2 --title "GAMING" --label "Which is faster" --style sans
+# creator in front of a background
+python skill/clean-thumbnail/scripts/thumb.py demo/subject-room.jpg --subject demo/subject-person.png --title "HOME STUDIO" --label "SMALL ROOM" --style sans --title-font outfit@Bold --label-font outfit@SemiBold --text-side right --push 0.35 --aspect 16:9 -o out/subject
+# game frame on a monitor
+python skill/clean-thumbnail/scripts/thumb.py crt.jpg --inset frame.png --inset-box 0.18,0.14,0.62,0.70 --title "DLSS 5" --label "On a CRT" --style sans
+```
+
+| Option | When to use it |
+|---|---|
+| `--lead title\|label\|ab` | Which slot is big. `ab` (default) renders both. |
+| `--text-side left\|right` | Override the automatically chosen calmer side. |
+| `--focus 0..1` | Move the horizontal crop on a wide source. |
+| `--crop x0,y0,x1,y1` | Keep part of the capture (fractions of it as given). Narrower than 16:9, the art moves to the far side, which makes room for the type when the subject is in the middle. |
+| `--push 0..1` | How much to soften the background behind subjects (default 0.5). |
+| `--logo logo.png --logo-white` | Use a transparent logo in place of rendered title text. |
+| `--title-font NAME\|FILE` | A bundled font matched to the game's or brand's lettering (`cinzel`, `bebas`, `orbitron`...; `--list-fonts`), or your own font file. |
+| `--title-tracking 0..0.5` | Letter spacing of the big type in em. Wide (0.1 to 0.2) for a thin, spaced-out logo; the font's own spacing by default. |
+| `--label-font NAME\|FILE` | Your channel's font for the label box: a bundled name (`outfit@SemiBold`) or a font file. |
+| `--list-fonts` | Print the bundled fonts with their real family names, looks, and the titles they fit. |
+| `--title-color white\|auto\|#hex` | Big type color. `auto` takes the image's signature color (a sunset, neon, an eclipse) and lightens it just enough to read; it stays white when the image has none. |
+| `--accent white\|auto\|#hex` | Label box color. Color the big type or the label box, not both. |
+| `--aspect 16:9,4:5,9:16` | Formats to render; `all` for every one. |
+| `--size 720p\|1080p\|1440p\|4k` | Force the 16:9 master size. |
+| `--channel FILE` | Channel settings, including saved formats; `./clean-thumbnail.json` loads automatically. Flags win for that run. |
+| `--feed DIR` | Place both variants in a grid with thumbnails from a local folder. |
+
+The [type rules](skill/clean-thumbnail/references/type-rules.md) keep the text budget at eight words or fewer.
+
+<a id="quality-gates"></a>
+## 🔍 Quality gates
+
+| Check | What the renderer does |
+|---|---|
+| Image preparation | Trims letterbox and pillarbox bars (video black and subtitle bars included, a dark night sky left alone), reads 16-bit and transparent images correctly, applies `--crop` in the coordinates of the image as given (bars are trimmed either way, including the clean bars of a letterboxed video inside the crop), picks the master size without upscaling, and warns when a small source, cut-out, inset or logo still needs it. |
+| Type placement | Picks the calmer side (or the side with room beside an inset), shrinks the type to fit the height and width, keeps cut-outs out of the type, and warns when type overlaps a subject or inset or runs off the frame. |
+| Layer matching | Matches each subject and inset to the photo behind it in color cast, tone, sharpness, and grain (sharpness against the unblurred photo), and prints what it changed. |
+| Contrast | Scores every element separately against WCAG 4.5:1 (title lines, kicker, subtitle, label box, logo, panel labels), darkens the type area once when light type fails because of the background, and names the element and the fix when it can't. |
+| Type look | Uses the official logo, else the bundled font closest to the game's or brand's lettering, else the channel font; warns about missing characters (accents, other scripts), all-caps blackletter or script, unknown weights, and type that ends up small. Numbers use lining figures and tracked type keeps its kerning. Colors get the same contrast check; `auto` colors are lightened until they pass, and two different accent colors get a warning. |
+| Safe zones | Keeps 16:9 type out of the duration-badge corner and 9:16 type and panel labels inside the Reels/Shorts safe zone, and warns when it can't. |
+| Inputs | Stops with a clear message on a missing file or font, an opaque logo, a fully transparent cut-out, conflicting roles, a `--crop` on comparison panels or one that leaves nothing, bad channel settings, or an `-o` that would overwrite an input. |
+| Export | Writes a master at the largest size the images support, a standard-size copy (1280×720 under 2 MB for YouTube, 1080 wide for vertical), and a preview sheet per variant and format. |
+
+These checks catch mechanical failures. They do **not** measure click-through rate, choose the best image, or guarantee that the subject is legible. Look at the previews and fix open warnings before publishing.
+
+<a id="tradeoffs"></a>
+## ⚖️ Build decisions and limits
+
+- **Real images over generated backdrops:** the thumbnail shows what the viewer will actually see, but it depends on useful images. The script cannot invent a better camera angle.
+- **Quiet compositing over the cut-out template:** subjects are matched to the photo instead of outlined and lit up. It reads as a photograph, at the cost of the instant pop the loud style buys.
+- **Two variants over one guess:** whether the subject or the hook should be big depends on the audience, so the renderer makes both and leaves the choice to YouTube's Test & Compare.
+- **Editable type over model-drawn text:** spelling and hierarchy remain controlled, but the result is intentionally quieter than a dramatic logo. Use `--logo` when the official mark carries recognition better.
+- **One color over a palette:** white by default, and at most one color taken from the image or the brand. `auto` picks the image's most vivid color family, which is not always the one you would choose, and lightens deep colors toward pastel; pass a hex code when you know the color.
+- **Feed-size review over full-size polish:** the 168 px and 120 px previews expose unreadable text early. Fine detail that only works at 4K is not a thumbnail advantage.
+
+The tool composes, matches, and grades real images; it does not fabricate scenes, draw insets in perspective, or replace the need to test variants with viewers. Quiet thumbnails are a bigger bet in categories where loud is the norm; the feed grid and Test & Compare will tell you per channel.
+
+<a id="installation"></a>
+## 🛠️ Installation
+
+**Codex:** copy `skill/clean-thumbnail/` to `~/.codex/skills/clean-thumbnail/`, install NumPy and Pillow, then invoke `$clean-thumbnail` with a video title and your images.
+
+**Clients accepting Agent Skills ZIPs:** run `python tools/build_zip.py` and upload `dist/clean-thumbnail.zip`.
+
+**Direct Python:** run [`thumb.py`](skill/clean-thumbnail/scripts/thumb.py) as in Quickstart. It uses system fonts when present, else its 16 bundled fonts, unless you pass your own. For automatic background removal on subjects, also `python -m pip install rembg`.
+
+<a id="verification"></a>
+## 🧪 Verification
+
+```bash
+python -m unittest discover -s tests
+```
+
+The suite covers master sizing and layout scaling for all three formats, the Reels safe zone, subject-following crops, stacked comparisons, the phone copy limit, calmer-side selection, both lead variants and stacked hooks, panels, subjects, insets, layer matching (cast, grain, sharpness), per-element WCAG contrast, logos, bundled fonts (catalog, weights, lining figures, kerning, missing glyphs), title and label colors (signature color, contrast lift, the one-color rule), cropping (bars trimmed outside the crop and clean video bars inside it, a dark stage inside it kept, any crop narrower than 16:9 kept at full height, inset boxes kept where you drew them and clipped to the art), the Dawnwalker, creator-photo, subject-layer and Death Stranding 2 demo commands, previews, feed grids, channel settings and saved formats, the CLI, and regression tests for every defect found in the outside and multi-agent reviews (bar trimming, crop rounding, panel label placement, inset visibility, input validation, font handling). Key checks are mutation-tested: putting each fixed bug back makes its test fail. The `demo/` folder is included in the repository for visual inspection; it is not part of the Agent Skills ZIP.
+
+For a short review path, read the [type rules](skill/clean-thumbnail/references/type-rules.md), compare the [capture](demo/simon-capture.jpg) with [variant A](demo/simon_A.jpg), [variant B](demo/simon_B.jpg) and a [preview](demo/simon_A_preview.png), then read [the renderer](skill/clean-thumbnail/scripts/thumb.py).
+
+---
+
+## 📜 License and author
+
+MIT; see [LICENSE](LICENSE). Built by [Rizwan Ahmed](https://github.com/RZ-Logic).
+
+The bundled fonts are from [Google Fonts](https://github.com/google/fonts) under the SIL Open Font License; each family's license is next to it in `skill/clean-thumbnail/fonts/<name>/OFL.txt`: Cinzel, Playfair Display, MedievalSharp, Grenze Gotisch, Bebas Neue, Oswald, Teko, Rajdhani, Orbitron, Outfit, Nunito, Black Ops One, Press Start 2P, Kaushan Script, Zilla Slab, Courier Prime.
+
+The game images in `demo/` are third-party game art, included only to show what the renderer does. They are not covered by the MIT license and belong to their owners; *The Blood of Dawnwalker* key art and logo are by Rebel Wolves, published by Bandai Namco Entertainment; the *Death Stranding 2: On the Beach* frame is the author's own capture of the game by Kojima Productions and Sony Interactive Entertainment.
+
+The creator photo, the subject-layer room photo and their thumbnail derivatives use the Pexels License, separately from the MIT code license. See [the creator photo credit](demo/creator-photo-LICENSE.md) and [the subject-layer sources and preparation note](demo/subject-LICENSE.md).

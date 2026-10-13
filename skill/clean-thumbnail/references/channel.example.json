@@ -1,0 +1,10 @@
+{
+  "style": "serif",
+  "accent": "#ffffff",
+  "title_color": "white",
+  "lead": "ab",
+  "aspect": "16:9",
+  "size": "auto",
+  "shade": 0.88,
+  "push": 0.5
+}

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">Clean Thumbnail</title>
+  <desc id="desc">A restrained dark banner showing a single abstract frame and a quiet type column.</desc>
+  <defs>
+    <linearGradient id="base" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#15120f"/>
+      <stop offset="1" stop-color="#28211b"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#5f4b3b"/>
+      <stop offset=".55" stop-color="#8f7351"/>
+      <stop offset="1" stop-color="#c5ab75"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="340" fill="url(#base)"/>
+  <path d="M0 0h705l-96 340H0z" fill="#16120f"/>
+  <path d="M658 0h542v340H560z" fill="url(#frame)"/>
+  <path d="M834 0l-121 340h77L926 0zM1095 0L950 340h79L1178 0z" fill="#211c18" opacity=".7"/>
+  <circle cx="1037" cy="116" r="62" fill="#f1d5a0" opacity=".3"/>
+  <path d="M730 282c58-48 105-75 165-89 79-19 181 15 305-31v178H660z" fill="#2b2520" opacity=".78"/>
+  <text x="68" y="74" fill="#b5a28e" font-family="Segoe UI, Arial, sans-serif" font-size="17" letter-spacing="5">AGENT SKILL / GAMEPLAY</text>
+  <text x="68" y="163" fill="#f5f0e8" font-family="Georgia, serif" font-size="65" letter-spacing="1">CLEAN</text>
+  <text x="68" y="232" fill="#f5f0e8" font-family="Georgia, serif" font-size="65" letter-spacing="1">THUMBNAIL</text>
+  <rect x="69" y="261" width="258" height="37" fill="none" stroke="#e7ded3" stroke-width="2"/>
+  <text x="83" y="286" fill="#e7ded3" font-family="Segoe UI, Arial, sans-serif" font-size="15" letter-spacing="3">ONE FRAME · QUIET TYPE</text>
+  <path d="M37 38h24M37 38v24M1139 38h24M1163 38v24M37 278v24M37 302h24M1163 278v24M1139 302h24" fill="none" stroke="#dfd0b9" stroke-width="2" opacity=".45"/>
+</svg>

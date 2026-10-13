@@ -1,0 +1,109 @@
+{
+  "cinzel": {
+    "family": "Cinzel", "file": "cinzel/Cinzel[wght].ttf", "instance": "Bold", "tracking": 0.08, "caps": true,
+    "look": "classical Roman capitals",
+    "cues": "all caps, flared wedge serifs, carved-stone proportions, wide letters",
+    "fits": "epic and mythic fantasy, dark fantasy, ancient history, prestige drama"
+  },
+  "playfair": {
+    "family": "Playfair Display", "file": "playfair/PlayfairDisplay[wght].ttf", "instance": "SemiBold",
+    "tracking": 0.04, "caps": true,
+    "look": "high-contrast didone serif",
+    "cues": "very thin hairlines against heavy stems, ball terminals, fashion-magazine feel",
+    "fits": "period drama, mystery, luxury, literary and cinematic titles"
+  },
+  "slab": {
+    "family": "Zilla Slab", "file": "slab/ZillaSlab-Bold.ttf", "instance": null, "tracking": 0.02, "caps": true,
+    "look": "slab serif",
+    "cues": "heavy block serifs, sturdy and mechanical, western or industrial feel",
+    "fits": "westerns, crime, industrial and survival settings, trucks and machines"
+  },
+  "medieval": {
+    "family": "MedievalSharp", "file": "medieval/MedievalSharp.ttf", "instance": null, "tracking": 0.03,
+    "caps": true,
+    "look": "storybook medieval display",
+    "cues": "pointed calligraphic strokes, playful and readable, tavern-sign feel",
+    "fits": "whimsical fantasy, folklore, tavern and adventure games, tabletop"
+  },
+  "gothic": {
+    "family": "Grenze Gotisch", "file": "gothic/GrenzeGotisch[wght].ttf", "instance": "SemiBold",
+    "tracking": 0.0, "caps": false,
+    "look": "blackletter",
+    "cues": "broken, angular blackletter strokes, dense texture; unreadable in all caps",
+    "fits": "gothic horror, vampires, metal, grimdark, religious-occult themes"
+  },
+  "typewriter": {
+    "family": "Courier Prime", "file": "typewriter/CourierPrime-Bold.ttf", "instance": null, "tracking": 0.04,
+    "caps": true,
+    "look": "typewriter",
+    "cues": "even-width typed letters with slab serifs, case-file or dossier feel",
+    "fits": "psychological and modern horror, true crime, mystery, espionage, found footage"
+  },
+  "bebas": {
+    "family": "Bebas Neue", "file": "bebas/BebasNeue-Regular.ttf", "instance": null, "tracking": 0.04,
+    "caps": true,
+    "look": "tall condensed capitals",
+    "cues": "narrow, tall, uniform-weight caps; poster and trailer feel",
+    "fits": "action, thrillers, sports, trailers, documentaries"
+  },
+  "oswald": {
+    "family": "Oswald", "file": "oswald/Oswald[wght].ttf", "instance": "Medium", "tracking": 0.02, "caps": true,
+    "look": "condensed grotesque",
+    "cues": "narrow sans with some weight contrast, newspaper-headline feel",
+    "fits": "news, explainers, sports analysis, history channels"
+  },
+  "teko": {
+    "family": "Teko", "file": "teko/Teko[wght].ttf", "instance": "SemiBold", "tracking": 0.02, "caps": true,
+    "look": "squared sans",
+    "cues": "squarish rounded-rectangle bowls, mid-width and heavy, scoreboard feel",
+    "fits": "esports, racing, sports games, shooters, fitness"
+  },
+  "rajdhani": {
+    "family": "Rajdhani", "file": "rajdhani/Rajdhani-SemiBold.ttf", "instance": null, "tracking": 0.06,
+    "caps": true,
+    "look": "squared technical sans",
+    "cues": "flat-sided squared letters, lighter and wider than teko, engineering-UI feel",
+    "fits": "tech, hardware, benchmarks, near-future sci-fi, cyberpunk UI"
+  },
+  "orbitron": {
+    "family": "Orbitron", "file": "orbitron/Orbitron[wght].ttf", "instance": "Bold", "tracking": 0.08,
+    "caps": true,
+    "look": "geometric sci-fi",
+    "cues": "wide, geometric, squared-circle letters, space-age",
+    "fits": "space, sci-fi shooters, synthwave, futuristic tech"
+  },
+  "outfit": {
+    "family": "Outfit", "file": "outfit/Outfit[wght].ttf", "instance": "SemiBold", "tracking": 0.02, "caps": true,
+    "look": "geometric modern sans",
+    "cues": "round geometric bowls, clean and neutral, app and brand feel",
+    "fits": "tech brands, apps, gadgets, startups, clean modern titles"
+  },
+  "nunito": {
+    "family": "Nunito", "file": "nunito/Nunito[wght].ttf", "instance": "ExtraBold", "tracking": 0.01,
+    "caps": true,
+    "look": "rounded friendly sans",
+    "cues": "rounded terminals, soft and warm, toy-like",
+    "fits": "cozy games, family and kids titles, lifestyle"
+  },
+  "stencil": {
+    "family": "Black Ops One", "file": "stencil/BlackOpsOne-Regular.ttf", "instance": null, "tracking": 0.04,
+    "caps": true,
+    "look": "military stencil",
+    "cues": "heavy stencil cuts, chamfered corners, crate-and-ammo feel",
+    "fits": "military shooters, tactical, war history"
+  },
+  "pixel": {
+    "family": "Press Start 2P", "file": "pixel/PressStart2P-Regular.ttf", "instance": null, "tracking": 0.0,
+    "caps": true,
+    "look": "8-bit pixel",
+    "cues": "blocky bitmap letters on a pixel grid",
+    "fits": "retro and indie pixel-art games, arcade, speedrunning classics"
+  },
+  "brush": {
+    "family": "Kaushan Script", "file": "brush/KaushanScript-Regular.ttf", "instance": null, "tracking": 0.0,
+    "caps": false,
+    "look": "casual brush-marker script",
+    "cues": "slanted hand-lettered marker strokes, friendly and energetic; poor in all caps",
+    "fits": "street, skate, surf, travel, food, vlogs"
+  }
+}
