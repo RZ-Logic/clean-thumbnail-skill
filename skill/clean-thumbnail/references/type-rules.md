@@ -3,6 +3,9 @@
 The thumbnail and the title are read together, so the thumbnail never repeats the title. It works
 for any video because it asks one question, not "what kind of video is this".
 
+These rules are for thumbnails. A standalone post (a Facebook or Instagram image whose text is the
+message) follows [Posts](#posts) instead: there is no video title to carry the rest.
+
 ## The one rule
 
 **The big type is what makes this video different from every other video about the same thing,
@@ -72,6 +75,27 @@ every video, and that is what makes the channel look like one channel.
 Color: white unless the image has one color it is known for (an eclipse, a neon sign, a team
 kit). Then `--title-color auto` takes that color from the image, or a hex code sets the brand's.
 One color per thumbnail: on the big type or the label box, not both.
+
+<a id="posts"></a>
+## Posts
+
+A post has no video title, so the image text is the message. Keep the user's words.
+
+| Slot | Flag | What goes in it |
+|---|---|---|
+| Headline | `--title` | The one thing a scroller should take away, in the user's own words: their headline if they wrote one, else the key phrase of their first sentence |
+| Body | `--body` | The rest of the message, verbatim and in order; `
+` for a line break the user made |
+| Details | `--details` | When, where, price, how to act or reply; parts joined with " · " |
+| Label | `--label` | Optional: a short tag the user gave ("Free", "This weekend") |
+
+- **Don't cut, reorder or move text into the caption.** Fix spelling and capitals only. No added
+  hype words, emoji or claims the user didn't make; keep their numbers, dates and names exactly.
+- **No word cap.** The script checks that the body reads at feed size instead. If it warns, show
+  the user the shortest cut that fixes it (or a taller format, 4:5 or 9:16) and wait for a yes.
+- **Hierarchy over size.** The headline is big, the body comfortable, the details small; if
+  everything is important, the headline is still one idea.
+- The quiet look stays: one font family per role, white type, one accent color at most.
 
 ## Never
 

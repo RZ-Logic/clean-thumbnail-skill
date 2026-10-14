@@ -1,11 +1,11 @@
 ---
 name: clean-thumbnail
-description: Makes restrained, editorial YouTube thumbnails from real images, for any kind of video (gaming, trailers, walkthroughs, tech and hardware comparisons, sports, education, vlogs), in the style of publisher and press thumbnails instead of the loud template of glowing text, arrows, stickers and color washes. Use when someone wants a YouTube thumbnail, gives a video title with a screenshot, capture, photo or cut-out, wants a split-screen comparison thumbnail, wants themselves or a product placed in front of a background, or wants a thumbnail that doesn't look like AI slop or like everyone else's. Also makes Facebook and Instagram feed (4:5) and Reels, Shorts and Stories (9:16) versions. Turns the title into short type in the game's, film's or brand's own lettering and color, renders an A/B pair at up to 4K plus 2 MB phone copies, and checks contrast, the duration-badge corner, the Reels safe zone and feed sizes.
+description: Makes restrained, editorial YouTube thumbnails from real images, for any kind of video (gaming, trailers, walkthroughs, tech and hardware comparisons, sports, education, vlogs), in the style of publisher and press thumbnails instead of the loud template of glowing text, arrows, stickers and color washes. Use when someone wants a YouTube thumbnail, gives a video title with a screenshot, capture, photo or cut-out, wants a split-screen comparison thumbnail, wants themselves or a product placed in front of a background, or wants a thumbnail that doesn't look like AI slop or like everyone else's. Also makes Facebook and Instagram feed (4:5) and Reels, Shorts and Stories (9:16) versions, and standalone feed posts that keep the user's whole message. Turns the title into short type in the game's, film's or brand's own lettering and color, renders an A/B pair at up to 4K plus 2 MB phone copies, and checks contrast, the duration-badge corner, the Reels safe zone and feed sizes.
 license: MIT for the code; the bundled fonts are SIL OFL 1.1 (fonts/*/OFL.txt)
 compatibility: Python 3.8+ with numpy and Pillow. Uses its 16 bundled OFL fonts by default (Playfair Display and Outfit for the default title and label), so the same command gives the same type on every OS; --system-fonts opts into installed faces (Bodoni MT, Bahnschrift, Didot), and any font file can be passed in. Optional rembg for removing backgrounds from subject photos.
 metadata:
   author: Rizwan Ahmed
-  version: "0.8.2"
+  version: "0.9.0"
 ---
 
 # Clean thumbnail
@@ -34,6 +34,22 @@ background; if they don't have one, the script uses rembg when installed, else a
 The inset box is in fractions of the background image: look at the background and estimate where
 the screen or frame is.
 
+## Thumbnail or post?
+
+Decide this first; it changes what happens to the user's words.
+
+- **Thumbnail:** the image sits next to a video title (a YouTube video, a Reel or Short cover). The
+  title carries the message, so the image gets a few words, picked with the type rules.
+- **Post:** the image is the message: a Facebook or Instagram post, an announcement, an event, an
+  offer, a hiring post, a promo. Render with `--mode post` and keep the user's words: the core
+  message as `--title`, the rest as `--body`, when, where, price and how to act as `--details`
+  ([type rules: Posts](references/type-rules.md#posts)). Fix spelling and capitals only. Never cut
+  the message or move it into the post's caption unless the user asks; if the script says the text
+  won't read at feed size, show the user the cut you would make and wait for a yes.
+  Posts often read best with `--backdrop solid` when the photo is busy or the message is long;
+  thumbnails usually keep the default `fade`.
+- **Unsure?** Ask once: "Is this a video thumbnail or a post image?"
+
 ## Workflow
 
 1. **Get the images.** The best background is a raw capture: photo mode, HUD off, 1440p or 4K,
@@ -41,9 +57,10 @@ the screen or frame is.
    has the subject in the middle, which `--subject-box` and `--crop` handle (step 5). Fan art needs
    the artist's permission and credit; say so if an image looks like fan art. Don't generate or
    repaint scenes with an image model.
-2. **Write the text** with [references/type-rules.md](references/type-rules.md): the big type is what
-   makes this video different, the label is context. No kicker unless it is needed. Show the user
-   the text and what you dropped from the title.
+2. **Write the text** with [references/type-rules.md](references/type-rules.md). Thumbnail: the big
+   type is what makes this video different, the label is context. No kicker unless it is needed.
+   Show the user the text and what you dropped from the title. Post: arrange the user's message into
+   headline, body and details without dropping words, and show them how you split it.
 3. **Pick the title look** with [references/fonts.md](references/fonts.md), in this order:
    the official logo if the user has one (`--logo`, press kits and official sites publish them);
    otherwise the bundled
@@ -125,7 +142,7 @@ the screen or frame is.
    can also keep a second element in view that the box doesn't know about (the creator demo keeps
    the camera phone visible this way).
 
-   Other flags: `--style serif|sans` (default title look), `--kicker TEXT` / `--subtitle TEXT` (small
+   Other flags: `--backdrop fade|solid` (what sits behind the type: fade darkens the photo into a shade, solid keeps the photo clean and puts the type on a solid `--bg` panel), `--style serif|sans` (default title look), `--kicker TEXT` / `--subtitle TEXT` (small
    lines above or below the big type; see the type rules), `--feather 0..1` (fade length of narrow or
    cropped art; shorten it when the fade reaches a face), `--shade 0..1` and `--bg #hex` (darkness and
    color of the type side), `--subject-box x0,y0,x1,y1`, `--band auto|top|bottom` (type band on 4:5 and 9:16),
@@ -160,11 +177,12 @@ the screen or frame is.
      color or sharpness. The script prints what it matched.
    - If the user has screenshots of current top thumbnails on the topic, pass them with `--feed DIR`
      and look at `_feed.png`: theirs should stand out.
-7. **Hand back** both variants (master and phone copy), the previews, the text used, and the title
-   look and colors (from the `title type:` and `colors:` lines). The pair is for YouTube's Test &
-   Compare, which takes up to three thumbnails per video and picks the winner on watch time share,
-   not click-through rate; clearly different thumbnails finish faster. Let the test pick, not you,
-   and don't promise a third variant.
+7. **Hand back.** A thumbnail: both variants (master and phone copy), the previews, the text used,
+   and the title look and colors (from the `title type:` and `colors:` lines). The pair is for
+   YouTube's Test & Compare, which takes up to three thumbnails per video and picks the winner on
+   watch time share, not click-through rate; clearly different thumbnails finish faster. Let the test
+   pick, not you, and don't promise a third variant. A post: the image, its preview and the text
+   exactly as placed, with the sizes from the `post text:` line; it is one image, not an A/B pair.
 
 ## Fixed specs
 

@@ -18,6 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "skill", "clean-thumbnail", "scripts", "thumb.py")
 FONTS = os.path.join(ROOT, "skill", "clean-thumbnail", "fonts")
 BROKEN = ("NameError", "AttributeError", "ImportError", "ModuleNotFoundError", "SyntaxError", "IndentationError")
+TEST_MODULES = ("test_thumb", "test_backdrop")  # test ids: "Class.test" (test_thumb) or "test_backdrop.Class.test"
 
 BAND_FLIP = '    if not j.band_forced and j.anchor == "bottom" and scores["top"]["score"] >= scores["bottom"]["score"] + BAND_MARGIN:'
 MUTANTS = [
@@ -77,13 +78,13 @@ MUTANTS = [
     ("no cut-away warning", "    if kept_share < 0.9:", "    if False:", "SubjectBox.test_subject_box_remaps_like_the_inset_box"),
     ("subject box with a cut-out allowed", "        if panels or subjects:", "        if False:",
      "SubjectBox.test_subject_box_is_validated"),
-    ("CLI drops --subject-box", "crop=args.crop, subject_box=args.subject_box)", "crop=args.crop)",
+    ("CLI drops --subject-box", "crop=args.crop, subject_box=args.subject_box, mode=", "crop=args.crop, mode=",
      "SubjectBox.test_subject_box_is_validated"),
     ("no side switch for the box", "            elif j.subject_box is not None:\n                text_side = _side_for_box(j)",
      "            elif False:\n                text_side = _side_for_box(j)", "SubjectBox.test_text_side_moves_to_keep_the_box_clear"),
     ("side switch picks the shaded side", '    side = "left" if scores["left"] > scores["right"] else "right"',
      '    side = "left" if scores["left"] < scores["right"] else "right"', "SubjectBox.test_text_side_moves_to_keep_the_box_clear"),
-    ("no shade warning", "    shade_bad = x1 > x0 and y1 > y0 and (vis < 0.7 or heavy > 0.2)", "    shade_bad = False",
+    ("no shade warning", "    shade_bad = not solid and x1 > x0 and y1 > y0 and (vis < 0.7 or heavy > 0.2)", "    shade_bad = False",
      "SubjectBox.test_explicit_side_warns_with_a_crop_that_works"),
     ("crop suggestion too lax", "SUGGEST_MIN_CLEAR = 0.9  #", "SUGGEST_MIN_CLEAR = 0.3  #",
      "SubjectBox.test_explicit_side_warns_with_a_crop_that_works"),
@@ -130,8 +131,8 @@ MUTANTS = [
     # review 9: --subject-box advice, --band, the duration badge and preview text
     ("crop advice ignores the trimmed bars", "bars=(tb[0], tb[2]),", "bars=(0, W),",
      "SubjectBoxAdvice.test_crop_advice_with_a_crop_follows_the_trimmed_bars"),
-    ("no vertical crop search", "    grid = [default] if default is None else [default] + [i / 50.0 for i in range(51)]",
-     "    grid = [default]", "SubjectBoxAdvice.test_tall_portrait_crop_moves_the_face_above_the_band"),
+    ("no vertical crop search", "        grid = [dflt] if dflt is None else [dflt] + [i / 50.0 for i in range(51)]",
+     "        grid = [dflt]", "SubjectBoxAdvice.test_tall_portrait_crop_moves_the_face_above_the_band"),
     ("overlap keeps its own side advice", "        shade_fix = overlap_fix = _wide_fix(j, shade_bad, overlap_bad)",
      '        shade_fix, overlap_fix = _wide_fix(j, shade_bad, overlap_bad), "use --text-side right or shorten the text"',
      "SubjectBoxAdvice.test_shade_and_overlap_name_one_fix_and_no_useless_side_switch"),
@@ -144,15 +145,15 @@ MUTANTS = [
     ("crop advice puts the inset under the type", '            if (k0 < column[1]) if side == "left" else (k1 > cv.w - column[1]):',
      "            if False:", "SubjectBoxAdvice.test_inset_and_subject_box_together"),
     ("tall crop follows the inset over the box",
-     "    if focus is None and cv.tall and j.subject_box is not None:  # the face wins over an inset on tall crops",
-     "    if focus is None and cv.tall and j.subject_box is not None and inset is None:",
+     "    elif focus is None and cv.tall and j.subject_box is not None:  # the face wins over an inset on tall crops",
+     "    elif focus is None and cv.tall and j.subject_box is not None and inset is None:",
      "SubjectBoxAdvice.test_inset_and_subject_box_together"),
     ("title line omits the style tracking",
      '            if title_tracking is None and own and abs(own["tracking"] - tracking_em) > 1e-9:', "            if False:",
      "SubjectBoxAdvice.test_default_title_line_names_the_exact_reproduction"),
     ("band choice ignores the safe zone",
-     "    inside, v, heavy = box_cover(rect, j.cv, vis_y=vis, region=box_region(j.cv))",
-     "    inside, v, heavy = box_cover(rect, j.cv, vis_y=vis)", "SubjectBoxAdvice.test_band_choice_counts_the_reels_safe_zone"),
+     "    inside, v, heavy = box_cover(rect, j.cv, vis_y=vis, region=region or box_region(j.cv))",
+     "    inside, v, heavy = box_cover(rect, j.cv, vis_y=vis, region=region)", "SubjectBoxAdvice.test_band_choice_counts_the_reels_safe_zone"),
     ("band choice scores the whole box",
      "    middle = box_cover((rect[0], rect[1] + 0.35 * h, rect[2], rect[1] + 0.75 * h), j.cv, vis_y=vis)[1]",
      "    middle = box_cover(rect, j.cv, vis_y=vis)[1]", "SubjectBoxAdvice.test_band_choice_weighs_the_middle_of_the_box"),
@@ -182,6 +183,91 @@ MUTANTS = [
     ("rembg once per variant", 'subjects=[cut_out(open_image(p, "subject")) for p in args.subject or []] or None,',
      'subjects=[open_image(p, "subject") for p in args.subject or []] or None,',
      "ReviewArgon.test_rembg_runs_once_per_subject_across_variants_and_formats"),
+    # post mode (--mode post)
+    ("body accepted in thumbnail mode", '    if (j.body or j.details) and j.mode != "post":', "    if False:",
+     "PostMode.test_body_and_details_need_post_mode"),
+    ("last wrapped line dropped", "    return lines + ([cur] if cur else [])", "    return lines",
+     "PostMode.test_post_keeps_every_word_in_order"),
+    ("details wrap by words only", '        for part in [p.strip() for p in line.split("·") if p.strip()]:',
+     "        for part in [line]:",
+     "PostMode.test_details_break_at_their_separators"),
+    ("word cap in post mode",
+     '    if j.mode == "post":  # no duration badge on a post image, and no word cap: the message is the text',
+     "    if False:", "PostMode.test_no_word_count_warning_in_post_mode"),
+    ("readability floor ignored", "        if feed_cap < POST_MIN_CAP - 1e-6:", "        if False:",
+     "PostMode.test_readability_warning_fires_only_for_an_over_long_message"),
+    ("body shrinks before the headline", "    big_min = min(j.base, POST_BIG_MIN)", "    big_min = j.base",
+     "PostMode.test_headline_shrinks_before_the_body"),
+    ("post band takes the whole height", '    if j.mode == "post" and not cv.reels:', "    if False:",
+     "PostMode.test_post_band_leaves_the_image_its_share"),
+    ("badge corner checked on posts",
+     '        bottom_limit = (cv.timestamp_zone[1] - cv.px(12) if text_side == "right" and j.mode != "post"',
+     '        bottom_limit = (cv.timestamp_zone[1] - cv.px(12) if text_side == "right"',
+     "PostMode.test_contrast_and_frame_checks_cover_body_and_details"),
+    ("post uses the saved aspect", '    aspects = (s["aspect"] if not post or args.aspect is not None else "4:5").split(",")',
+     '    aspects = s["aspect"].split(",")', "PostMode.test_post_cli_defaults_and_report"),
+    ("post renders an A/B pair", '    lead_choice = s["lead"] if not post or args.lead is not None else "title"',
+     '    lead_choice = s["lead"]', "PostMode.test_post_cli_defaults_and_report"),
+    ("post column as narrow as a thumbnail's", "        cv.col_share = POST_COL_SHARE", "        pass",
+     "PostMode.test_post_band_leaves_the_image_its_share"),
+    # --backdrop solid (tests/test_backdrop.py)
+    ("solid panel not opaque", "    canvas = Image.new(\"RGB\", (cv.w, cv.h), tuple(bg))\n    canvas.paste(depth(grade(img, vignette=0)",
+     "    canvas = Image.blend(Image.new(\"RGB\", (cv.w, cv.h), tuple(bg)), cover(src, cv.w, cv.h, focus, vfocus)[0], 0.12)"
+     "\n    canvas.paste(depth(grade(img, vignette=0)",
+     "test_backdrop.SolidTall.test_feed_4x5_panel_below_the_photo"),
+    ("photo bleeds into the panel", "    img, scale, sx, sy = cover(src, rw, rh, focus, vfocus)",
+     "    img, scale, sx, sy = cover(src, rw + cv.px(24), rh + cv.px(24), focus, vfocus)",
+     "test_backdrop.SolidTall.test_feed_4x5_panel_below_the_photo"),
+    ("solid photo vignetted", "    canvas.paste(depth(grade(img, vignette=0), cv, push), (rect[0], rect[1]))",
+     "    canvas.paste(depth(grade(img), cv, push), (rect[0], rect[1]))",
+     "test_backdrop.SolidTall.test_photo_is_not_vignetted"),
+    ("tall photo runs under the type", "        return (0, 0, cv.w, int(round(min(max(band[0], 1), cv.h))))",
+     "        return (0, 0, cv.w, int(round(min(max(band[0] + cv.px(120), 1), cv.h))))",
+     "test_backdrop.SolidTall.test_feed_4x5_panel_below_the_photo"),
+    ("top band panel on the wrong side", "            return (0, int(round(min(max(band[1], 0), cv.h - 1))), cv.w, cv.h)",
+     "            return (0, 0, cv.w, int(round(min(max(band[0], 1), cv.h))))",
+     "test_backdrop.SolidTall.test_band_at_the_top_puts_the_panel_above"),
+    ("16:9 panel without breathing room", "    edge = int(min(cv.w - 1, cv.margin + cv.col_w + cv.margin))",
+     "    edge = int(min(cv.w - 1, cv.margin + cv.col_w))", "test_backdrop.SolidWide.test_panel_covers_the_type_column"),
+    ("feather applied to solid", "    elif j.backdrop == \"solid\":  # no shade: the type sits on the opaque panel",
+     "    elif j.backdrop == \"solid\" and abs(j.feather - 0.36) < 1e-9:",
+     "test_backdrop.SolidNotes.test_shade_and_feather_have_no_effect_and_say_so"),
+    ("no shade/feather note", "    if abs(j.shade - 0.88) > 1e-9 or abs(j.feather - 0.36) > 1e-9:", "    if False:",
+     "test_backdrop.SolidNotes.test_shade_and_feather_have_no_effect_and_say_so"),
+    ("shade/feather note always", "    if abs(j.shade - 0.88) > 1e-9 or abs(j.feather - 0.36) > 1e-9:", "    if True:",
+     "test_backdrop.SolidNotes.test_shade_and_feather_have_no_effect_and_say_so"),
+    ("subject box ignored in the photo rect", "        return focus_on(j.subject_box, j.src, rw, rh)", "        return None",
+     "test_backdrop.SolidTall.test_subject_box_stays_in_the_photo_and_visible"),
+    ("solid vertical crop ignores the box", "            dflt = vfocus_in(j.subject_box, j.src, rect, region)",
+     "            dflt = None", "test_backdrop.SolidTall.test_portrait_capture_crop_follows_the_box_vertically"),
+    ("panel counts as in view", "        vis_x, vis_y = span_mask(cv.w, ir[0], ir[2]), span_mask(cv.h, ir[1], ir[3])",
+     "        vis_x, vis_y = None, None", "test_backdrop.SolidWide.test_subject_box_in_the_panel_area_is_out_of_view"),
+    ("explicit focus loses to the box", "    if j.focus is not None:\n        return j.focus",
+     "    if False:\n        return j.focus", "test_backdrop.SolidWide.test_subject_box_in_the_panel_area_is_out_of_view"),
+    ("cut-out placed over the panel", "band if cv.tall else None, tex, area=j.image_rect)",
+     "band if cv.tall else None, tex, area=None)", "test_backdrop.SolidWide.test_wide_cutout_keeps_to_the_photo_columns"),
+    ("no note when --panel ignores solid",
+     "        j.info[\"notes\"].append(\"--backdrop solid is ignored with --panel: comparison panels fill the frame\")",
+     "        pass",
+     "test_backdrop.SolidNotes.test_solid_is_ignored_with_panels"),
+    ("unknown backdrop accepted", "    if j.backdrop not in BACKDROPS:", "    if False:",
+     "test_backdrop.FadeDefault.test_unknown_backdrop_is_rejected"),
+    ("channel key unvalidated", ' "backdrop": list(BACKDROPS),', "",
+     "test_backdrop.SolidCLI.test_channel_key_validates_and_applies"),
+    ("fade gets solid info", "    if j.backdrop != \"solid\":\n        return\n    cv, src, info = j.cv, j.src, j.info",
+     "    if False:\n        return\n    cv, src, info = j.cv, j.src, j.info",
+     "test_backdrop.FadeDefault.test_fade_is_the_default_and_identical"),
+    ("render defaults to solid", 'body="", details="", backdrop="fade"):', 'body="", details="", backdrop="solid"):',
+     "test_backdrop.FadeDefault.test_fade_is_the_default_and_identical"),
+    ("channel default is solid", '                mode="thumbnail", backdrop="fade")', '                mode="thumbnail", backdrop="solid")',
+     "test_backdrop.SolidCLI.test_cli_prints_the_backdrop_line_after_colors"),
+    ("CLI drops --backdrop", 'details=args.details, backdrop=s["backdrop"])', "details=args.details)",
+     "test_backdrop.SolidCLI.test_cli_prints_the_backdrop_line_after_colors"),
+    ("CLI omits the backdrop line", '            print("backdrop: solid (panel %s)" % info["backdrop_color"])',
+     "            pass", "test_backdrop.SolidCLI.test_cli_prints_the_backdrop_line_after_colors"),
+    ("solid contrast hint names --focus", '            if j.backdrop == "solid":\n                hint = "use a darker --bg"',
+     '            if False:\n                hint = "use a darker --bg"',
+     "test_backdrop.SolidContrast.test_light_panel_says_use_a_darker_bg"),
 ]
 
 
@@ -193,13 +279,19 @@ def load(path):
     return mod
 
 
+def test_id(test):
+    """A test id names its module ("test_backdrop.Class.test"); a bare "Class.test" is in test_thumb."""
+    return test if test.startswith("test_") else "test_thumb." + test
+
+
 def run(mod, test):
     sys.modules["thumb"] = mod
-    sys.modules.pop("test_thumb", None)
-    import test_thumb
-    test_thumb.thumb = mod
+    for name in TEST_MODULES:  # re-import so each module's `thumb` is this copy
+        sys.modules.pop(name, None)
+    for name in TEST_MODULES:
+        importlib.import_module(name).thumb = mod
     return unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(
-        unittest.defaultTestLoader.loadTestsFromName("test_thumb." + test))
+        unittest.defaultTestLoader.loadTestsFromName(test_id(test)))
 
 
 def main():

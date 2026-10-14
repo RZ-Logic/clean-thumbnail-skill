@@ -7,7 +7,7 @@
 <p align="center">
   <strong>Real images. Quiet type. A thumbnail that reads in the feed.</strong><br/>
   An Agent Skill and local renderer for restrained YouTube thumbnails, for any kind of video,<br/>
-  with Facebook feed and Reels/Shorts versions from the same images and text.
+  with Facebook feed and Reels/Shorts versions, plus standalone posts that keep the whole message.
 </p>
 
 <p align="center">
@@ -27,6 +27,7 @@
   <a href="#example">Two Variants</a> ·
   <a href="#dawnwalker">Official Logo</a> ·
   <a href="#subject-demo">Subject Layer</a> ·
+  <a href="#post">Feed Posts</a> ·
   <a href="#image-roles">Image Roles</a> ·
   <a href="#formats">Formats</a> ·
   <a href="#title-look">Title Look</a> ·
@@ -83,7 +84,7 @@ The [source photo](demo/creator-photo.jpg) is by [Ron Lach on Pexels](https://ww
 python skill/clean-thumbnail/scripts/thumb.py demo/creator-photo.jpg --title "ONE TAKE" --label "NO SCRIPT" --style sans --title-font outfit@Bold --label-font outfit@SemiBold --text-side left --crop 0.2,0,0.85,1 --feather 0.2 --aspect 16:9 -o out/creator
 ```
 
-Without the hand-picked crop, marking his face with `--subject-box 0.30,0.12,0.42,0.39` lets the script decide: the 16:9 type moves to the right, clear of his face, and the 4:5 and 9:16 crops center on him, with no warnings in any format. The crop above is still the better picture here, because it also keeps the phone in view, which the box doesn't know about.
+Without the hand-picked crop, marking his face with `--subject-box 0.31,0.23,0.42,0.39` lets the script decide: the 16:9 type moves to the right, clear of his face, and the 4:5 and 9:16 crops center on him, with no warnings in any format. The crop above is still the better picture here, because it also keeps the phone in view, which the box doesn't know about.
 
 The included source is resized to 3840×2560; the crop keeps 2496×2560 of it, and both masters render at 3840×2160 without upscaling. The [A preview](demo/creator_A_preview.png) and [B preview](demo/creator_B_preview.png) show the headlines at 168 px and in the squint test. The 1280×720 phone copies for [A](demo/creator_A_phone.jpg) and [B](demo/creator_B_phone.jpg) are under 2 MB. Source and derivative credits are recorded in [the photo license note](demo/creator-photo-LICENSE.md); the fictional copy does not describe the model's own video or imply an endorsement.
 
@@ -133,6 +134,57 @@ python skill/clean-thumbnail/scripts/thumb.py demo/subject-room.jpg --subject de
 `--subject` places the person on the left, away from the type, and `--push 0.35` softens the room behind him. The renderer matches the cut-out's color cast, black and white points, sharpness and grain to the background. Both slots use bundled Outfit in white, standing in for a channel font. The transparent PNG is included, so this command needs only NumPy and Pillow; background removal was a one-time preparation step.
 
 The 4000×2250 room crop is scaled 0.96× and the 1924×2328 cut-out about 0.87×, so neither is upscaled for the 3840×2160 masters. The cut-out's hair edge was cleaned against the original wall and a patch of the original sofa seen through his arm was removed; [the preparation note](demo/subject-LICENSE.md) describes how. The [A preview](demo/subject_A_preview.png) and [B preview](demo/subject_B_preview.png) show the headline and person at feed sizes; the [A phone copy](demo/subject_A_phone.jpg) and [B phone copy](demo/subject_B_phone.jpg) are 1280×720 and under 2 MB. The run reports 14.5:1 and 14.8:1 text contrast with no warnings. Both source photos and the derivatives use the Pexels License; [the source and preparation note](demo/subject-LICENSE.md) records the credits.
+
+<a id="post"></a>
+### Standalone feed posts that keep the message
+
+A thumbnail gets a few words because the video title carries the rest. A standalone post has no title, so its image text is the message. `--mode post` keeps the user's words: the headline as `--title`, the message as `--body` (wrapped, in the label font), and when and where as `--details`. Nothing is cut, reordered or moved into the caption. The script checks the body and details at the size of a 360 px phone feed and warns when they would be too small. A post renders one 4:5 image by default.
+
+<p align="center">
+  <img src="demo/post-gallery.jpg" alt="Three standalone post examples: a creator workshop with full descriptive copy and booking details, a café event with its date and price, and a workspace offer with its logo left of the company name" width="100%"/>
+</p>
+
+These are **fictional demonstrations**, including the businesses, events and offers. Each keeps its complete body and details on the image. The photographs are real, licensed sources; [the credits note](demo/post-LICENSE.md) identifies them. Every post below is rendered by the supplied `--mode post` implementation.
+
+#### Creator workshop: headline, full message and booking details
+
+A real creator photo with the person and recording phone kept together. The complete workshop description, date, time, venue and call to action sit on a solid panel below the clean photograph (`--backdrop solid`), rendered straight from the original photo. The face stays fully visible. The title uses bundled Outfit Bold; the body and details use Outfit Medium, in white.
+
+```bash
+python skill/clean-thumbnail/scripts/thumb.py demo/creator-photo.jpg --mode post --title 'MAKE YOUR FIRST VIDEO' --body 'Learn to frame a shot, record clear sound and feel natural on camera. Bring your phone; leave with a finished clip.' --details 'Saturday 24 October · 10 AM–12 PM\nStudio 04 · Free · Reserve your place' --label 'CREATOR WORKSHOP' --style sans --title-font outfit@Bold --label-font outfit@Medium --subject-box 0.31,0.23,0.42,0.39 --backdrop solid --bg '#18252D' -o out/post-creator
+```
+
+[Master](demo/post-creator_4x5.jpg) · [1080 copy](demo/post-creator_4x5_1080.jpg) · [Feed preview](demo/post-creator_4x5_preview.png) · [Photo](demo/creator-photo.jpg)
+
+#### Café event: atmosphere, date, venue and price
+
+A close-up coffee photograph carries the mood, with the type in the calm area above it. The serif headline uses bundled Playfair Display SemiBold; body and details use Outfit Medium. The whole invitation, date, opening hours, venue, drop-in instruction and $5 price remain on the image.
+
+```bash
+python skill/clean-thumbnail/scripts/thumb.py demo/post-coffee.jpg --mode post --title 'COFFEE & CONVERSATION' --body 'Good coffee. Better conversation.\nJoin our monthly table for local makers.' --details 'Sunday 25 October · 9–11 AM\nCedar Café · Drop in · $5' --title-font playfair@SemiBold --title-tracking 0.02 --label-font outfit@Medium --crop 0,0,1,0.9 --band top --bg '#1B1712' --shade 0.96 -o out/post-coffee
+```
+
+[Master](demo/post-coffee_4x5.jpg) · [1080 copy](demo/post-coffee_4x5_1080.jpg) · [Feed preview](demo/post-coffee_4x5_preview.png) · [Photo](demo/post-coffee.jpg)
+
+#### Studio offer: a horizontal brand mark and a complete offer
+
+**Stillroom** is a fictional studio created for this demo. Its supplied transparent logo keeps the room-plan mark **to the left of the name**. `--logo` occupies the title slot, so the complete offer, including the opening sentence, stays in `--body`. Paragraph spacing separates the promise from the explanation; `--details` retains the consultation length, price and call to action. The wordmark uses Playfair Display SemiBold, and the body uses Outfit Regular.
+
+```bash
+python skill/clean-thumbnail/scripts/thumb.py demo/subject-room.jpg --mode post --title 'STILLROOM' --body 'Make room for better work.\n\nA calm workspace, planned around your day. We help you rethink the layout before you buy new furniture.' --details 'Design consultation · 30 minutes · $45\nBook a studio call' --logo demo/post-stillroom-logo.png --title-font playfair@SemiBold --label-font outfit@Regular --backdrop solid --bg '#18352E' -o out/post-studio
+```
+
+[Master](demo/post-studio_4x5.jpg) · [1080 copy](demo/post-studio_4x5_1080.jpg) · [Feed preview](demo/post-studio_4x5_preview.png) · [Photo](demo/subject-room.jpg) · [Logo](demo/post-stillroom-logo.png)
+
+The workshop and studio posts are rendered straight from the original wide photographs with `--backdrop solid`: the renderer keeps the photograph clean in its own rectangle and puts the type on an opaque panel of the `--bg` color, with a hard edge between them and no input preparation. The café uses a portrait photograph with the default fade. The sources are recorded in [post-LICENSE.md](demo/post-LICENSE.md); all final lettering is rendered locally, with no generated scene or replacement face.
+
+| Post | Master | Body cap at 360 px | Details cap at 360 px | Minimum element contrast |
+|---|---|---|---|---|
+| Creator workshop | 1440×1800 | 10.7 px | 9.0 px | 12.4:1 |
+| Café event | 2160×2700 | 10.5 px | 9.1 px | 13.4:1 |
+| Studio offer | 1440×1800 | 10.5 px | 9.0 px | 10.6:1 |
+
+All three commands finish without warnings. Every body and details word is preserved in order, the creator's face is 100% in frame and in the clean photograph, with no type over it, and the 1080×1350 copies are under 2 MB. The two solid-panel posts are 1440×1800 because their photographs are 2560 and 2250 px tall; the renderer never upscales. [The measured report](demo/post-demo-report.json) records the exact text, wrapped lines, sizes and checks. The 360 px previews were also visually reviewed; these checks assess readability and layout, not engagement.
 
 <a id="image-roles"></a>
 ## 🧩 Image roles
@@ -201,13 +253,13 @@ White (left) and `--title-color auto` (right): the art's gold `#a7753d` is light
 
 | Part | Role |
 |---|---|
-| [Skill instructions](skill/clean-thumbnail/SKILL.md) | Assigns image roles, derives short text, renders the A/B pair, and reviews the result. |
-| [Type rules](skill/clean-thumbnail/references/type-rules.md) | Turns any video title into a subject and a hook, with examples across topics. |
+| [Skill instructions](skill/clean-thumbnail/SKILL.md) | Assigns image roles, writes short thumbnail text or preserves a standalone post message, renders, and reviews the result. |
+| [Type rules](skill/clean-thumbnail/references/type-rules.md) | Turns a video title into a subject and hook, or keeps a post message as headline, body and details. |
 | [Channel settings example](skill/clean-thumbnail/references/channel.example.json) | Style, fonts, title and label colors, lead, size, and formats saved once for every video. |
 | [Bundled fonts](skill/clean-thumbnail/fonts/) and [matching guide](skill/clean-thumbnail/references/fonts.md) | 16 open-licensed display fonts (Roman capitals to pixel) so the big type can look like the game, film, or brand, each with its `OFL.txt`; [`catalog.json`](skill/clean-thumbnail/fonts/catalog.json) lists their real family names, weights, spacing and the looks they fit. |
 | [`agents/openai.yaml`](skill/clean-thumbnail/agents/openai.yaml) | Display name, short description and default prompt for Codex's skill list. |
 | [`thumb.py`](skill/clean-thumbnail/scripts/thumb.py) | Composes, matches layers, typesets, checks, and exports. |
-| [Demo](demo/) | Five worked examples (Simon; Dawnwalker with its logo; a creator photo; a cut-out over a separate room; a Death Stranding 2 capture for 4:5 and 9:16): source images, A/B variants, vertical formats, and feed-size previews. |
+| [Demo](demo/) | Five thumbnail examples and three standalone posts: sources, logos, master and upload copies, reproduction commands, credits, and feed-size previews. |
 | [Tests](tests/) | Resolution, layout, lead, image roles, layer matching, contrast, formats, cropping, fonts, colors, channel settings, and the CLI. |
 
 The renderer runs locally with NumPy and Pillow. No image-generation service is in the rendering path.
@@ -237,6 +289,7 @@ python skill/clean-thumbnail/scripts/thumb.py crt.jpg --inset frame.png --inset-
 
 | Option | When to use it |
 |---|---|
+| `--mode post` with `--body TEXT` and `--details TEXT` | A standalone post instead of a thumbnail: keeps the whole message (headline, wrapped body, when and where), checks it reads on a 360 px phone feed, and renders one 4:5 image unless `--aspect` or `--lead` is given. |
 | `-o PATH` | Output stem, `.jpg` name or folder (default `<capture>_thumb`). Variants and formats add `_A`, `_B`, `_4x5`, `_9x16`, so a second run with the same `-o` for other formats keeps the first run's files; an `-o` that would overwrite an input stops with an error. |
 | `--style serif\|sans` | The default title look when no logo or matched font is given: bundled Playfair Display Bold or Outfit Bold. |
 | `--panel A --panel B --panel-label L` | Comparison panels (2 or 3) instead of a capture, each with its label, in the same order. |
@@ -248,6 +301,7 @@ python skill/clean-thumbnail/scripts/thumb.py crt.jpg --inset frame.png --inset-
 | `--subject-box x0,y0,x1,y1` | Mark the face (or a product's label) in the capture, in fractions of it as given: from the brows to the chin, not the hair or the whole body. The 16:9 type takes the side that keeps it clear, the 4:5 and 9:16 crops center on it, the 9:16 type band moves to the top when that shades it less, and a warning fires when it still ends up under type or shade or out of frame, naming one fix: a `--crop`, `--focus` or `--text-side` to try on 16:9, or `--band` on 4:5 and 9:16. |
 | `--band auto\|top\|bottom` | Where the type band goes on 4:5 and 9:16. `auto` (default) keeps the bottom, or takes the top when that keeps `--subject-box` clearly more in view. |
 | `--feather 0..1` | Length of the fade where narrow or cropped art meets the dark side, as a share of the art's width (default 0.36). Shorten it when the fade reaches a face. |
+| `--backdrop fade\|solid` | What sits behind the type. `fade` (default): the photo darkens into the shade behind the type. `solid`: the photo stays clean in its own rectangle and the type sits on a solid `--bg` panel with a hard edge, in every format and in post mode (channel key `backdrop`). `--shade` and `--feather` have no effect with `solid`, and `--panel` comparisons ignore it. |
 | `--shade 0..1` / `--bg #hex` | Darkness of the type side (default 0.88) and its color (default: taken from the image's shadows). |
 | `--push 0..1` | How much to soften the background behind subjects (default 0.5). |
 | `--logo logo.png --logo-white` | Use a transparent logo in place of rendered title text. |
@@ -263,7 +317,7 @@ python skill/clean-thumbnail/scripts/thumb.py crt.jpg --inset frame.png --inset-
 | `--channel FILE` | Channel settings, including saved formats; `./clean-thumbnail.json` loads automatically. Flags win for that run. |
 | `--feed DIR` | Place both variants in a grid with thumbnails from a local folder. |
 
-The [type rules](skill/clean-thumbnail/references/type-rules.md) keep the text budget at eight words or fewer.
+The [type rules](skill/clean-thumbnail/references/type-rules.md) keep **thumbnail** text at eight words or fewer. **Posts** keep the complete message and check its readability at phone feed size.
 
 <a id="quality-gates"></a>
 ## 🔍 Quality gates
@@ -272,6 +326,7 @@ The [type rules](skill/clean-thumbnail/references/type-rules.md) keep the text b
 |---|---|
 | Image preparation | Trims letterbox and pillarbox bars (video black and subtitle bars included, a dark night sky left alone), reads 16-bit and transparent images correctly, applies `--crop` in the coordinates of the image as given (bars are trimmed either way, including the clean bars of a letterboxed video inside the crop), picks the master size without upscaling, and warns when a small source, cut-out, inset or logo still needs it. |
 | Type placement | Picks the calmer side (or the side with room beside an inset, or the side that keeps `--subject-box` clear), shrinks the type to fit the height and width, keeps cut-outs out of the type, and warns when type overlaps a subject or inset or runs off the frame. |
+| Post message | Keeps every body and details word in order; shrinks the headline before the body, warns below 8 px cap height at the phone feed width, and exports one post by default. |
 | Subject box | Measures where `--subject-box` landed in every format (in frame or in the Reels safe zone, visible, under heavy shade, under type), prints it, and warns with the fix when the face is shaded, covered or cut off. Without a box the script finds the subject by edge activity, which can't recognize a face, so it can't warn about one. |
 | Layer matching | Matches each subject and inset to the photo behind it in color cast, tone, sharpness, and grain (sharpness against the unblurred photo), and prints what it changed. |
 | Contrast | Scores every element separately against WCAG 4.5:1 (title lines, kicker, subtitle, label box, logo, panel labels), darkens the type area once when light type fails because of the background, and names the element and the fix when it can't. |
@@ -326,4 +381,4 @@ The bundled fonts are from [Google Fonts](https://github.com/google/fonts) under
 
 The game images in `demo/` are third-party game art, included only to show what the renderer does. They are not covered by the MIT license and belong to their owners; *The Blood of Dawnwalker* key art and logo are by Rebel Wolves, published by Bandai Namco Entertainment; the *Death Stranding 2: On the Beach* frame is the author's own capture of the game by Kojima Productions and Sony Interactive Entertainment; the Simon painting is official splash art from *Clair Obscur: Expedition 33*, © 2025 Sandfall Interactive, published by Kepler Interactive (the official card credits art director Nicholas Maxson-Francombe), cropped from the copy on the [Hero Wiki](https://hero.fandom.com/wiki/Simon_(Clair_Obscur:_Expedition_33)). Rights holders can ask for any demo image to be removed by opening an issue.
 
-The creator photo, the subject-layer room photo and their thumbnail derivatives use the Pexels License, separately from the MIT code license. See [the creator photo credit](demo/creator-photo-LICENSE.md) and [the subject-layer sources and preparation note](demo/subject-LICENSE.md).
+The creator photo, the subject-layer room photo, the coffee photo and their rendered derivatives use the Pexels License, separately from the MIT code license. See [the creator photo credit](demo/creator-photo-LICENSE.md), [the subject-layer sources](demo/subject-LICENSE.md), and [the post-demo credits](demo/post-LICENSE.md).

@@ -1448,6 +1448,20 @@ class Crop(unittest.TestCase):
                     self.assertEqual(im.size, (1280, 720))
                 self.assertLess(os.path.getsize(phone), 2 * 1024 * 1024)
 
+    def test_post_cli_renders_one_image_with_the_whole_message(self):
+        room = os.path.join(ROOT, "demo", "subject-room.jpg")
+        if not os.path.exists(room):
+            self.skipTest("demo files not present")
+        body = "Bring a printed copy or a laptop. We'll go through it line by line with you, one on one, in 20 minutes."
+        with tempfile.TemporaryDirectory() as d:
+            code, text = run_cli([room, "--mode", "post", "--title", "FREE RESUME REVIEWS", "--body", body,
+                                  "--details", "Saturday 10 AM to 2 PM · Milton Public Library", "-o", os.path.join(d, "post")])
+            self.assertEqual(code, 0, text)
+            self.assertNotIn("warning:", text)
+            self.assertIn("post text: body", text)
+            self.assertTrue(os.path.exists(os.path.join(d, "post_4x5.jpg")))
+            self.assertFalse(os.path.exists(os.path.join(d, "post_A.jpg")))  # one image, not an A/B pair
+
     def test_ds2_vertical_demo_command_runs(self):
         cap = os.path.join(ROOT, "demo", "ds2-capture.jpg")
         if not os.path.exists(cap):
@@ -2036,6 +2050,194 @@ class ReviewArgon(unittest.TestCase):
             else:
                 sys.modules["rembg"] = saved
         self.assertEqual(len(calls), 1)  # not once per variant and format (6)
+
+
+# ---------------------------------------------------------------- post mode (--mode post)
+
+POST_BODY = "Bring a printed copy or a laptop. We'll go through it line by line with you, one on one, in 20 minutes."
+POST_DETAILS = "Saturday 10 AM to 2 PM · Milton Public Library"
+POST_LONG = ("We are hosting free resume reviews all day this Saturday at the Milton Public Library, in the community "
+             "room on the second floor. Bring a printed copy of your resume or a laptop with it open, and a list of "
+             "the jobs you want. One of our volunteer reviewers, all of them hiring managers or recruiters, will sit "
+             "with you one on one for twenty minutes and go through it line by line: the summary, the order of your "
+             "experience, the numbers that show results, and the words that get past applicant tracking systems."
+             "\\n\\nNo sign-up needed, first come first served. Coffee and snacks on us. Tell a friend who is looking.")
+
+
+def dark_scene(w=1920, h=1080):
+    """A calm, dark photo-like frame: a gradient with texture, so post text has an easy background."""
+    a = np.linspace(30, 90, w, dtype=np.float32)[None, :, None] * np.ones((h, 1, 3), np.float32)
+    a += RNG.normal(0, 6, (h, w, 1))
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGB")
+
+
+class PostMode(unittest.TestCase):
+    """--mode post: the image is the message, so every word is laid out and checked for feed readability."""
+
+    def test_body_and_details_need_post_mode(self):
+        for kw in (dict(body="Bring a laptop."), dict(details="Saturday · Library")):
+            with self.assertRaises(ValueError) as e:
+                thumb.render(dark_scene(), "REVIEWS", **kw)
+            self.assertIn("--mode post", str(e.exception))
+        with self.assertRaises(ValueError):
+            thumb.render(dark_scene(), "REVIEWS", mode="poster")
+        with tempfile.TemporaryDirectory() as d:
+            dark_scene().save(os.path.join(d, "cap.png"))
+            code, text = run_cli(["cap.png", "--title", "REVIEWS", "--body", "Bring a laptop.", "-o", "t"], cwd=d)
+            self.assertEqual(code, 2)
+            self.assertIn("--mode post", text)
+            self.assertNotIn("Traceback", text)
+            self.assertFalse(os.path.exists(os.path.join(d, "t_A.jpg")))
+
+    def test_thumbnail_mode_is_unchanged_by_the_post_code(self):
+        bg = half_busy(1280, 720)
+        a, ia = thumb.render(bg, "SIMON", "No hit", lead="title")
+        b, ib = thumb.render(bg, "SIMON", "No hit", lead="title", mode="thumbnail", aspect="16:9")
+        self.assertTrue(np.array_equal(np.asarray(a), np.asarray(b)))
+        self.assertEqual(ia, ib)
+        self.assertNotIn("post_text", ia)
+        self.assertNotIn("mode", ia)
+        self.assertEqual(thumb.Canvas(1280, 720).col_w, int(1280 * thumb.COL_SHARE))
+
+    def test_post_keeps_every_word_in_order(self):
+        details = POST_DETAILS + " · Room 2B · questions: careers@example.org"
+        _, info = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_LONG, details=details)
+        pt = info["post_text"]
+        for name, text in (("body", POST_LONG), ("details", details)):
+            lines = pt[name]["lines"]
+            self.assertEqual(thumb.post_words(" ".join(lines)), thumb.post_words(text))  # all words, in order
+            drawn = [b for n, b in info["elements"] if n == name]
+            self.assertEqual(len(drawn), len(lines))  # one drawn element per laid-out line
+            self.assertEqual([b[1] for b in drawn], sorted(b[1] for b in drawn))  # top to bottom
+        self.assertGreater(len(pt["body"]["lines"]), 5)  # wrapped, not cut
+        self.assertTrue(" ".join(pt["body"]["lines"]).endswith("Tell a friend who is looking."))
+        # forced breaks and paragraphs as the user wrote them
+        _, info = thumb.render(dark_scene(), "SIMON", mode="post", body="One.\\nTwo.\\n\\nThree.", details="A\\nB")
+        self.assertEqual(info["post_text"]["body"]["lines"], ["One.", "Two.", "Three."])
+        self.assertEqual(info["post_text"]["details"]["lines"], ["A", "B"])
+        tops = [b[1] for n, b in info["elements"] if n == "body"]
+        self.assertGreater(tops[2] - tops[1], tops[1] - tops[0])  # a paragraph gap before "Three."
+
+    def test_details_break_at_their_separators(self):
+        font = thumb.load_font(thumb.bundled_spec("outfit@SemiBold"), 40)
+        text = "Saturday 10 AM to 2 PM · Milton Public Library · Room 2B"
+        lines = thumb.wrap_details(font, text, thumb.text_width(font, "Saturday 10 AM to 2 PM · Milton", 0))
+        self.assertEqual(lines, ["Saturday 10 AM to 2 PM", "Milton Public Library · Room 2B"])
+        self.assertEqual(thumb.wrap_details(font, text, 5000), [text])  # fits: kept whole, dots and all
+
+    def test_no_word_count_warning_in_post_mode(self):
+        title = "THE BIGGEST FREE RESUME REVIEW DAY IN MILTON THIS YEAR"
+        _, thumb_info = thumb.render(dark_scene(), title, "Free", lead="title")
+        self.assertTrue(warned(thumb_info, "words of type"))
+        _, info = thumb.render(dark_scene(), title, "Free", mode="post", body=POST_BODY, details=POST_DETAILS)
+        self.assertFalse(warned(info, "words of type"))
+        self.assertFalse(warned(info, "too small to read"))
+
+    def test_readability_warning_fires_only_for_an_over_long_message(self):
+        _, ok = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_BODY, details=POST_DETAILS)
+        self.assertFalse(warned(ok, "too small to read"))
+        self.assertGreaterEqual(ok["post_text"]["body"]["feed_cap"], thumb.POST_MIN_CAP)
+        self.assertGreaterEqual(ok["post_text"]["details"]["feed_cap"], thumb.POST_MIN_CAP)
+        self.assertEqual(ok["post_text"]["feed_width"], 360)
+        _, long_ = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_LONG * 2,
+                                details=POST_DETAILS)
+        self.assertLess(long_["post_text"]["body"]["feed_cap"], thumb.POST_MIN_CAP)
+        w = [x for x in long_["warnings"] if "too small to read" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("360 px wide phone feed", w[0])
+        self.assertIn("shorten the text", w[0])
+        self.assertEqual(thumb.post_words(" ".join(long_["post_text"]["body"]["lines"])),
+                         thumb.post_words(POST_LONG * 2))  # smaller, never cut
+        # 16:9 posts are judged at 360 px wide too, and the fix names the taller format
+        _, wide = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_LONG,
+                               details=POST_DETAILS, aspect="16:9")
+        self.assertTrue(warned(wide, "--aspect 4:5"))
+
+    def test_headline_shrinks_before_the_body(self):
+        _, info = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_LONG,
+                               details=POST_DETAILS)
+        self.assertLess(info["post_text"]["body"]["feed_cap"], thumb.POST_BODY_CAP)  # the body had to shrink
+        cv = thumb.Canvas(*info["size"])
+        self.assertLessEqual(info["big_size"], cv.px(thumb.POST_BIG_MIN))  # only after the headline did
+        _, short = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_BODY)
+        self.assertGreaterEqual(short["post_text"]["body"]["feed_cap"], thumb.POST_BODY_CAP)
+
+    def test_post_band_leaves_the_image_its_share(self):
+        _, info = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_LONG,
+                               details=POST_DETAILS)
+        cv = thumb.Canvas(*info["size"])
+        self.assertEqual(info["aspect"], "4:5")  # the post default
+        self.assertGreaterEqual(info["text_box"][1] - cv.px(40), cv.h * thumb.POST_IMAGE_SHARE - 1)
+        self.assertGreater(info["text_box"][3] - info["text_box"][1], 0.3 * cv.h)  # and the text gets the rest
+        # 16:9: the post column is wider than a thumbnail's
+        _, wide = thumb.render(dark_scene(), "FREE RESUME REVIEWS", mode="post", body=POST_BODY,
+                               details=POST_DETAILS, aspect="16:9", text_side="left")
+        cv = thumb.Canvas(*wide["size"])
+        widest = max(b[2] - b[0] for n, b in wide["elements"] if n == "body")
+        self.assertGreater(widest, int(cv.w * thumb.COL_SHARE))
+        self.assertLessEqual(widest, int(cv.w * thumb.POST_COL_SHARE))
+
+    def test_contrast_and_frame_checks_cover_body_and_details(self):
+        _, info = thumb.render(Image.new("RGB", (1920, 1080), (235, 235, 230)), "REVIEWS", mode="post",
+                               body=POST_BODY, details=POST_DETAILS, bg="#e8e8e8")
+        self.assertTrue(any(w.startswith("the body has") for w in info["warnings"]))
+        self.assertTrue(any(w.startswith("the details has") for w in info["warnings"]))
+        _, info = thumb.render(dark_scene(), "REVIEWS", mode="post", body="x" * 400)
+        self.assertTrue(warned(info, "the body runs outside the edge of the frame"))
+        self.assertEqual(info["post_text"]["body"]["lines"], ["x" * 400])  # never broken or cut
+        _, reels = thumb.render(dark_scene(), "REVIEWS", mode="post", body="y" * 300, aspect="9:16")
+        self.assertTrue(warned(reels, "the body runs outside the Reels/Shorts safe zone"))
+        # no duration badge on a post: type may reach the bottom-right corner of a 16:9 post
+        _, wide = thumb.render(dark_scene(), "REVIEWS", mode="post", body=POST_LONG, details=POST_DETAILS,
+                               aspect="16:9", text_side="right")
+        self.assertFalse(warned(wide, "duration badge"))
+        self.assertGreater(wide["text_box"][3], thumb.Canvas(*wide["size"]).timestamp_zone[1])  # uses that room
+
+    def test_post_cli_defaults_and_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            dark_scene().save(os.path.join(d, "cap.png"))
+            args = ["cap.png", "--mode", "post", "--title", "RESUME REVIEWS", "--label", "Free",
+                    "--body", POST_BODY, "--details", POST_DETAILS]
+            code, text = run_cli(args + ["-o", "p"], cwd=d)
+            self.assertEqual(code, 0, text)
+            made = sorted(f for f in os.listdir(d) if f.startswith("p"))
+            self.assertEqual(made, ["p_4x5.jpg", "p_4x5_preview.png"])  # one 4:5 render, no A/B pair, no 16:9
+            self.assertIn("post text: body ", text)
+            self.assertIn("px on the 360 px phone feed", text)
+            self.assertIn("title type:", text)
+            self.assertNotIn("no saved formats", text)
+            # the channel file's thumbnail formats and A/B lead don't apply to a post, and the run says so
+            with open(os.path.join(d, thumb.CHANNEL_FILE), "w") as f:
+                json.dump({"aspect": "16:9", "lead": "ab", "mode": "post"}, f)
+            code, text = run_cli(["cap.png", "--title", "RESUME REVIEWS", "--label", "Free", "--body", POST_BODY,
+                                  "-o", "c"], cwd=d)
+            self.assertEqual(code, 0, text)
+            self.assertTrue(os.path.exists(os.path.join(d, "c_4x5.jpg")))
+            self.assertFalse(any(f.startswith("c_A") or f == "c.jpg" for f in os.listdir(d)))
+            self.assertIn('the saved "aspect" (16:9)', text)
+            self.assertIn("is for thumbnails", text)
+            # flags on the command line still win
+            code, text = run_cli(args + ["--aspect", "16:9", "--lead", "ab", "-o", "w"], cwd=d)
+            self.assertEqual(code, 0, text)
+            self.assertTrue(os.path.exists(os.path.join(d, "w_A.jpg")))
+            self.assertTrue(os.path.exists(os.path.join(d, "w_B.jpg")))
+            self.assertFalse(warned({"warnings": text.splitlines()}, "duration badge"))
+
+    def test_channel_mode_key_validates(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "channel.json")
+            with open(path, "w") as f:
+                json.dump({"mode": "poster"}, f)
+            with self.assertRaises(ValueError) as e:
+                thumb.load_channel(path)
+            self.assertIn("thumbnail, post", str(e.exception))
+            with open(path, "w") as f:
+                json.dump({"mode": "post"}, f)
+            self.assertEqual(thumb.load_channel(path)["mode"], "post")
+            dark_scene().save(os.path.join(d, "cap.png"))
+            code, text = run_cli(["cap.png", "--mode", "posts", "--title", "X", "-o", "t"], cwd=d)
+            self.assertEqual(code, 2)
+            self.assertIn("thumbnail, post", text)
 
 
 if __name__ == "__main__":

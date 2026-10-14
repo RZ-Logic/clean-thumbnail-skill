@@ -1,0 +1,158 @@
+[
+  {
+    "id": "post-creator",
+    "title": "MAKE YOUR FIRST VIDEO",
+    "label": "CREATOR WORKSHOP",
+    "body": "Learn to frame a shot, record clear sound and feel natural on camera. Bring your phone; leave with a finished clip.",
+    "details": "Saturday 24 October · 10 AM–12 PM\nStudio 04 · Free · Reserve your place",
+    "size": [
+      1440,
+      1800
+    ],
+    "minimum_element_contrast": 12.44,
+    "post_text": {
+      "feed_width": 360,
+      "min_cap": 8.0,
+      "body": {
+        "size": 60,
+        "cap": 43,
+        "feed_cap": 10.7,
+        "lines": [
+          "Learn to frame a shot, record clear sound and",
+          "feel natural on camera. Bring your phone;",
+          "leave with a finished clip."
+        ]
+      },
+      "details": {
+        "size": 51,
+        "cap": 36,
+        "feed_cap": 9.0,
+        "lines": [
+          "Saturday 24 October · 10 AM–12 PM",
+          "Studio 04 · Free · Reserve your place"
+        ]
+      }
+    },
+    "subject_box": {
+      "box": [
+        0.31,
+        0.23,
+        0.42,
+        0.39
+      ],
+      "rect": [
+        446,
+        221,
+        605,
+        374
+      ],
+      "inside": 1.0,
+      "visibility": 1.0,
+      "heavy": 0.0,
+      "glyphs": 0.0,
+      "under_type": 0.0
+    },
+    "backdrop": "solid",
+    "backdrop_color": "#18252d",
+    "image_rect": [
+      0,
+      0,
+      1440,
+      833
+    ],
+    "warnings": [],
+    "notes": [
+      "crop centers --subject-box in the photo (focus 0.50); set --focus to override",
+      "type scaled down to fit the height"
+    ],
+    "phone_bytes": 303655
+  },
+  {
+    "id": "post-coffee",
+    "title": "COFFEE & CONVERSATION",
+    "label": "",
+    "body": "Good coffee. Better conversation.\nJoin our monthly table for local makers.",
+    "details": "Sunday 25 October · 9–11 AM\nCedar Café · Drop in · $5",
+    "size": [
+      2160,
+      2700
+    ],
+    "minimum_element_contrast": 13.36,
+    "post_text": {
+      "feed_width": 360,
+      "min_cap": 8.0,
+      "body": {
+        "size": 90,
+        "cap": 63,
+        "feed_cap": 10.5,
+        "lines": [
+          "Good coffee. Better conversation.",
+          "Join our monthly table for local makers."
+        ]
+      },
+      "details": {
+        "size": 77,
+        "cap": 55,
+        "feed_cap": 9.1,
+        "lines": [
+          "Sunday 25 October · 9–11 AM",
+          "Cedar Café · Drop in · $5"
+        ]
+      }
+    },
+    "subject_box": null,
+    "warnings": [],
+    "notes": [
+      "cropped the capture to x 0-2400, y 0-3236 of 2400x3595"
+    ],
+    "phone_bytes": 211448
+  },
+  {
+    "id": "post-studio",
+    "title": "STILLROOM",
+    "label": "",
+    "body": "Make room for better work.\n\nA calm workspace, planned around your day. We help you rethink the layout before you buy new furniture.",
+    "details": "Design consultation · 30 minutes · $45\nBook a studio call",
+    "size": [
+      1440,
+      1800
+    ],
+    "minimum_element_contrast": 10.64,
+    "post_text": {
+      "feed_width": 360,
+      "min_cap": 8.0,
+      "body": {
+        "size": 60,
+        "cap": 42,
+        "feed_cap": 10.5,
+        "lines": [
+          "Make room for better work.",
+          "A calm workspace, planned around your day.",
+          "We help you rethink the layout before you buy",
+          "new furniture."
+        ]
+      },
+      "details": {
+        "size": 51,
+        "cap": 36,
+        "feed_cap": 9.0,
+        "lines": [
+          "Design consultation · 30 minutes · $45",
+          "Book a studio call"
+        ]
+      }
+    },
+    "subject_box": null,
+    "backdrop": "solid",
+    "backdrop_color": "#18352e",
+    "image_rect": [
+      0,
+      0,
+      1440,
+      874
+    ],
+    "warnings": [],
+    "notes": [],
+    "phone_bytes": 300613
+  }
+]

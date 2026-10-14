@@ -39,7 +39,7 @@ import sys
 import numpy as np
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFile, ImageFilter, ImageFont, ImageOps
 
-__version__ = "0.8.2"
+__version__ = "0.9.0"
 
 SIZES = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440), "4k": (3840, 2160)}
 PHONE_SIZE = (1280, 720)
@@ -55,9 +55,26 @@ ASPECTS = {
 # Reels and Shorts cover the top 14% (header), bottom 35% (caption, audio) and right 15% (buttons).
 REELS_SAFE = {"top": 0.14, "bottom": 0.35, "right": 0.15}
 BANDS = ("auto", "top", "bottom")  # --band: where the type band goes on 4:5 and 9:16
+# --backdrop: what sits behind the type. fade: the photo runs under it, shaded toward the type; solid: the photo
+# keeps its own rectangle and the type sits on an opaque panel of the --bg color, with a hard edge between them.
+BACKDROPS = ("fade", "solid")
+SOLID_IDLE_NOTE = "with --backdrop solid, --shade and --feather have no effect"
 COL_SHARE = 0.40  # type column width as a share of the canvas
 MAX_LUMA_BEHIND_TYPE = 0.45  # white type over sRGB 0.45 is about 4.5:1 contrast
 MIN_CONTRAST = 4.5  # WCAG AA for normal text, applied to every element
+# --mode post: a standalone feed post whose image text is the message (no video title beside it), so the
+# script keeps every word of --body and --details and checks they read at the size a phone shows the post.
+MODES = ("thumbnail", "post")
+POST_FEED_WIDTH = {"16:9": 360, "4:5": 360, "9:16": 300}  # px wide on a phone: feed card, feed card, Reels screen
+# Body cap height (px of a capital H) at that width. 10.5 px is Facebook's own 15 px post text; 8 px is about
+# 11 px type, Apple's smallest recommended text size and the size of the feed's timestamps: below it the
+# message is squinted at, not read, so the script warns. Details sit 1.5 px smaller, never under the floor
+# while the body is above it.
+POST_BODY_CAP, POST_MIN_CAP, POST_DETAILS_DROP = 10.5, 8.0, 1.5
+POST_LAST_CAP = 4.0  # fitting stops shrinking here; past it the text runs off the frame and is flagged
+POST_BIG_BASE, POST_BIG_MIN = 150, 80  # headline size cap and the size it shrinks to before the body does
+POST_IMAGE_SHARE = 0.45  # 4:5: the image keeps at least this share of the frame above the text band
+POST_COL_SHARE = 0.50  # 16:9: the type column's share of the width (thumbnails: COL_SHARE)
 CHANNEL_FILE = "clean-thumbnail.json"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
@@ -104,6 +121,7 @@ _font_index = None
 class Canvas:
     """Output geometry. Lengths are designed at 1280x720 (wide) or 1080 px wide (tall)
     and scaled by `u`."""
+    col_share = COL_SHARE  # 16:9 type column share of the width; posts set POST_COL_SHARE
 
     def __init__(self, w, h):
         self.w, self.h = int(w), int(h)
@@ -121,7 +139,7 @@ class Canvas:
     @property
     def col_w(self):
         if not self.tall:
-            return int(self.w * COL_SHARE)
+            return int(self.w * self.col_share)
         right = self.w * REELS_SAFE["right"] if self.reels else self.margin
         return int(self.w - self.margin - right)
 
@@ -943,6 +961,72 @@ def vfocus_on(box, src, cv):
     return float(min(max(sy / (src.height - ch), 0.0), 1.0))
 
 
+# ---------------------------------------------------------------- solid backdrop (--backdrop solid)
+# The photo keeps its own rectangle, cover-cropped and unshaded; the type sits on an opaque panel of the
+# --bg color with a hard straight edge between them.
+
+def solid_rect(cv, band, anchor, text_side):
+    """The photo's rectangle (x0, y0, x1, y1) in canvas px with --backdrop solid. Tall: the full width on
+    the side of the type band away from the type (the panel runs from the band's outer edge, padding
+    included, to the canvas edge). 16:9: the full height beside the panel, which takes the type column
+    (margin + column width + one margin of breathing room) on the text side."""
+    if cv.tall:
+        if anchor == "top":
+            return (0, int(round(min(max(band[1], 0), cv.h - 1))), cv.w, cv.h)
+        return (0, 0, cv.w, int(round(min(max(band[0], 1), cv.h))))
+    edge = int(min(cv.w - 1, cv.margin + cv.col_w + cv.margin))
+    return (edge, 0, cv.w, cv.h) if text_side == "left" else (0, 0, cv.w - edge, cv.h)
+
+
+def solid_region(cv, rect):
+    """Where a --subject-box counts as in view with --backdrop solid: the photo rect (on 9:16 also inside
+    the Reels/Shorts safe zone); a box in the panel is out of view."""
+    rg = box_region(cv) or (0, 0, cv.w, cv.h)
+    return (max(rect[0], rg[0]), max(rect[1], rg[1]), min(rect[2], rg[2]), min(rect[3], rg[3]))
+
+
+def solid_view(src, rect, focus=0.5, vfocus=None):
+    """Where the source lands when cover-cropped into rect: (mapper from source fractions to canvas px, scale)."""
+    rw, rh = rect[2] - rect[0], rect[3] - rect[1]
+    (sx, sy, _, _), scale = cover_box(src.width, src.height, rw, rh, focus, vfocus)
+    mapper = lambda fx, fy: (rect[0] + (fx * src.width - sx) * scale, rect[1] + (fy * src.height - sy) * scale)  # noqa: E731
+    return mapper, scale
+
+
+def vfocus_in(box, src, rect, region):
+    """Vertical crop position that puts the box (fractions of src) at the middle of the visible part
+    (region) of the photo rect; None when the cover crop cuts nothing vertically."""
+    rw, rh = rect[2] - rect[0], rect[3] - rect[1]
+    scale = max(rw / src.width, rh / src.height)
+    ch = rh / scale
+    if ch >= src.height:
+        return None
+    at = ((region[1] + region[3]) / 2.0 - rect[1]) / rh if region[3] > region[1] else 0.5
+    sy = (box[1] + box[3]) / 2 * src.height - at * ch
+    return float(min(max(sy / (src.height - ch), 0.0), 1.0))
+
+
+def span_mask(n, lo, hi):
+    """1 for indices lo..hi-1 (the photo rect's columns or rows), 0 elsewhere (the panel)."""
+    m = np.zeros(n, dtype=np.float32)
+    m[max(0, int(lo)):max(0, int(hi))] = 1.0
+    return m
+
+
+def compose_solid(src, cv, bg, rect, focus=None, vfocus=None, push=0.0):
+    """--backdrop solid: an opaque canvas of bg with the photo cover-cropped into rect, unshaded and without a
+    vignette (focus and vfocus steer the crop; None picks the busiest window and centers vertically).
+    Returns (canvas, scale, mapper from source fractions to canvas px)."""
+    rw, rh = rect[2] - rect[0], rect[3] - rect[1]
+    if focus is None:
+        focus = subject_focus(src, (rw / max(rw / src.width, rh / src.height)) / src.width)
+    img, scale, sx, sy = cover(src, rw, rh, focus, vfocus)
+    canvas = Image.new("RGB", (cv.w, cv.h), tuple(bg))
+    canvas.paste(depth(grade(img, vignette=0), cv, push), (rect[0], rect[1]))
+    mapper = lambda fx, fy: (rect[0] + (fx * src.width - sx) * scale, rect[1] + (fy * src.height - sy) * scale)  # noqa: E731
+    return canvas, scale, mapper
+
+
 SUGGEST_MIN_CLEAR = 0.9  # mean visibility a suggested --crop must give the box
 
 
@@ -1042,12 +1126,16 @@ def compose_panels(srcs, cv, bg, shade=0.88, top_shade=False, band_top=None, ban
     return canvas, scales
 
 
-def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture_ref=None):
+def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture_ref=None, area=None):
     """Cut-outs away from the type (beside it on wide canvases, below it on tall ones),
-    bottom-anchored, never into the type column, matched to what is behind them.
+    bottom-anchored, never into the type column, matched to what is behind them. area (wide canvases,
+    --backdrop solid): the photo rect, whose columns the cut-outs keep to.
     Returns (canvas, match reports, mask of where the subjects landed)."""
     n = len(subjects)
-    if cv.tall:
+    if area is not None and not cv.tall:
+        x0, x1 = area[0], area[2]
+        target_h = int(cv.h * (0.94 if n == 1 else 0.84))
+    elif cv.tall:
         x0, x1 = 0, cv.w
         target_h = int(cv.h * (0.66 if n == 1 else 0.58))
         if band is not None:  # stay below the type band
@@ -1092,11 +1180,11 @@ def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture
     return canvas, reports, mask
 
 
-def place_inset(canvas, inset, box, mapper, cv, warnings):
+def place_inset(canvas, inset, box, mapper, cv, warnings, clip=None):
     """Fit an image into a region of the background (box in fractions of the background image).
     Only the part inside both the frame and the background image is drawn and matched (narrow or
-    cropped art leaves the dark type side outside the image). Returns (canvas, match report,
-    visible rect or None)."""
+    cropped art leaves the dark type side outside the image); clip (--backdrop solid: the photo rect)
+    narrows that further. Returns (canvas, match report, visible rect or None)."""
     fx0, fy0, fx1, fy1 = box
     x0, y0 = mapper(fx0, fy0)
     x1, y1 = mapper(fx1, fy1)
@@ -1108,6 +1196,8 @@ def place_inset(canvas, inset, box, mapper, cv, warnings):
     ix1, iy1 = mapper(1.0, 1.0)
     vis = (max(0, x0, int(round(ix0))), max(0, y0, int(round(iy0))),
            min(cv.w, x1, int(round(ix1))), min(cv.h, y1, int(round(iy1))))
+    if clip is not None:
+        vis = (max(vis[0], clip[0]), max(vis[1], clip[1]), min(vis[2], clip[2]), min(vis[3], clip[3]))
     if vis[2] - vis[0] < 8 or vis[3] - vis[1] < 8:
         warnings.append("inset box falls outside the visible frame: check --inset-box, --focus and --crop.")
         return canvas, {}, None
@@ -1210,12 +1300,102 @@ def fit_logo(logo, max_w, max_h):
     return logo.resize((max(1, int(logo.width * k)), max(1, int(logo.height * k))), Image.LANCZOS)
 
 
+# ---------------------------------------------------------------- post text (--body, --details)
+# Every word the user gave is laid out, in order: lines break between words (or at " · " in the details),
+# never inside or instead of one. A word wider than the column stays whole on its own line.
+
+def post_paragraphs(text):
+    """--body text -> paragraphs, each a list of the lines the user broke ('\\n'); a blank line
+    ('\\n\\n') starts a new paragraph."""
+    paras, cur = [], []
+    for ln in text.replace("\\n", "\n").replace("\r\n", "\n").split("\n"):
+        if ln.strip():
+            cur.append(ln.strip())
+        elif cur:
+            paras.append(cur)
+            cur = []
+    return paras + ([cur] if cur else [])
+
+
+def wrap_words(font, text, max_w):
+    """Greedy word wrap of one line to max_w; returns the lines, every word kept."""
+    lines, cur = [], ""
+    for word in text.split():
+        t = cur + " " + word if cur else word
+        if cur and text_width(font, t, 0) > max_w:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = t
+    return lines + ([cur] if cur else [])
+
+
+def wrap_details(font, text, max_w):
+    """--details lines: each line the user broke stays whole when it fits; else it breaks at its
+    " · " separators (the break replaces that dot), and a part still too wide wraps by words."""
+    out = []
+    for line in text.replace("\\n", "\n").split("\n"):
+        line = " ".join(line.split())
+        if not line:
+            continue
+        if text_width(font, line, 0) <= max_w:
+            out.append(line)
+            continue
+        cur = ""
+        for part in [p.strip() for p in line.split("·") if p.strip()]:
+            t = cur + " · " + part if cur else part
+            if cur and text_width(font, t, 0) > max_w:
+                out.append(cur)
+                cur = part
+            else:
+                cur = t
+        if cur:
+            out.append(cur)
+    return [w for ln in out for w in (wrap_words(font, ln, max_w) if text_width(font, ln, 0) > max_w else [ln])]
+
+
+def post_items(lspec, body, details, max_w, body_size, details_size):
+    """Body and details as text_block items in the label font, in the order given (the first item's gap is
+    the least gap text_block leaves below the headline). Leading is fixed per font (ascender to descender of
+    the face, not of each line), so every line sits at the same pitch. Returns (items, {"body": lines, "details": lines})."""
+    items, log = [], {"body": [], "details": []}
+
+    def metrics(font):
+        return cap_metrics(font, "Hbdfhklt")[0], cap_metrics(font, "gjpqy")[1]
+    if body:
+        f = load_font(lspec, body_size)
+        a, d = metrics(f)
+        line_gap, para_gap = max(0, int(round(body_size * 1.38)) - a - d), int(round(body_size * 0.55))
+        for p, para in enumerate(post_paragraphs(body)):
+            for i, ln in enumerate(w for forced in para for w in wrap_words(f, forced, max_w)):
+                gap = int(round(body_size * 0.8)) if not items else line_gap + (para_gap if i == 0 else 0)
+                items.append(("text", ln, f, 0, a, d, gap, (255, 255, 255, 255), "body"))
+                log["body"].append(ln)
+    if details:
+        f = load_font(lspec, details_size)
+        a, d = metrics(f)
+        line_gap = max(0, int(round(details_size * 1.32)) - a - d)
+        for i, ln in enumerate(wrap_details(f, details, max_w)):
+            gap = (int(round(details_size * 0.8)) if not items
+                   else int(round(body_size * 0.95)) if i == 0 else line_gap)
+            items.append(("text", ln, f, 0, a, d, gap, (255, 255, 255, 225), "details"))
+            log["details"].append(ln)
+    return items, log
+
+
+def post_words(text):
+    """The words of post text in order, without the " · " separators a line break may replace."""
+    return [w for w in text.replace("\\n", " ").replace("·", " ").split()]
+
+
 def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent,
                logo=None, logo_big=True, max_w=None, stack=False, max_size=190, big_name="title",
-               big_color=(255, 255, 255, 255)):
+               big_color=(255, 255, 255, 255), box_first=False, extra=None):
     """Type stack: kicker, (small logo), big lines or big logo, subtitle, boxed label.
     stack=True fits each big line on its own (capped at 1.6x the smallest), so a short
     first line leads a longer second one. Small lines shrink to fit max_w.
+    Posts: box_first puts the boxed label above the big type, as a tag, and `extra` (post_items:
+    body and details lines, already wrapped) follows the stack.
     Returns (items, block width, block height, big size)."""
     max_w = max_w or cv.col_w
     lines = split_lines(big) if big else []
@@ -1247,6 +1427,11 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
         f, trk = fit_small(lspec, kicker.upper(), cv.px(26), cv.px(16), max_w, 6 / 26)
         a, d = cap_metrics(f, kicker.upper())
         items.append(("text", kicker.upper(), f, trk, a, d, 0, (255, 255, 255, 185), "kicker"))
+    if box and box_first:
+        f, trk = fit_small(lspec, box.upper(), cv.px(30), cv.px(18), max_w, 5 / 30, pad=2 * cv.px(22))
+        a, _ = cap_metrics(f, box.upper())
+        items.append(("box", box.upper(), f, trk, int(a + 2 * cv.px(15)), 0, cv.px(18) if items else 0, accent,
+                      "label box"))
     if logo is not None and not logo_big:
         items.append(("image", logo, None, 0, logo.height, 0, cv.px(18) if items else 0, None, "logo"))
     for i, (ln, (f, s)) in enumerate(zip(lines, fonts)):
@@ -1259,11 +1444,14 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
         f, trk = fit_small(lspec, subtitle.upper(), cv.px(28), cv.px(16), max_w, 5 / 28)
         a, d = cap_metrics(f, subtitle.upper())
         items.append(("text", subtitle.upper(), f, trk, a, d, int(tsize * 0.18), (255, 255, 255, 215), "subtitle"))
-    if box:
+    if box and not box_first:
         f, trk = fit_small(lspec, box.upper(), cv.px(30), cv.px(18), max_w, 5 / 30, pad=2 * cv.px(22))
         a, _ = cap_metrics(f, box.upper())
         items.append(("box", box.upper(), f, trk, int(a + 2 * cv.px(15)), 0, int(tsize * 0.32), accent,
                       "label box"))
+    if extra:  # the first post line keeps clear of the headline: a share of its size, at least the item's own gap
+        items.append(extra[0][:6] + ((max(extra[0][6], int(tsize * 0.30)) if items else 0),) + extra[0][7:])
+        items.extend(extra[1:])
     width, height = 0.0, 0
     for kind, text, f, trk, a, d, gap, _, _ in items:
         w = text.width if kind == "image" else text_width(f, text, trk) + (2 * cv.px(22) if kind == "box" else 0)
@@ -1467,6 +1655,10 @@ class Job:
     title_tracking: object = None
     subject_box: object = None
     band_pos: str = "auto"  # --band
+    mode: str = "thumbnail"  # --mode: "post" lays out the whole message (body, details)
+    body: str = ""
+    details: str = ""
+    backdrop: str = "fade"  # --backdrop
     info: dict = field(default_factory=dict)
     # set by _load_sources
     layout: str = None
@@ -1513,6 +1705,11 @@ class Job:
     bh: int = 0
     top: int = 0
     band: tuple = None
+    # set by _fit_post (posts): the body and details as laid out, see _check_post
+    post_fit: dict = None
+    post_ratio: float = None  # the label font's cap height per px of size
+    # set by _solid_layout (--backdrop solid): the photo's rectangle in canvas px
+    image_rect: tuple = None
     # set by _compose
     built: dict = None
 
@@ -1525,6 +1722,12 @@ def _check_args(j):
     # composed accents (e + U+0301 -> é) so tracked type and glyph checks see one letter
     title, label, kicker, subtitle = (unicodedata.normalize("NFC", t or "") for t in (title, label, kicker, subtitle))
     panel_labels = [unicodedata.normalize("NFC", p or "") for p in panel_labels] if panel_labels else panel_labels
+    if j.mode not in MODES:
+        raise ValueError("mode must be one of %s" % ", ".join(MODES))
+    j.body, j.details = (unicodedata.normalize("NFC", t or "").strip() for t in (j.body, j.details))
+    if (j.body or j.details) and j.mode != "post":
+        raise ValueError("--body and --details are post text: add --mode post (a thumbnail keeps a few words "
+                         "and leaves the message to the video title)")
     if aspect not in ASPECTS:
         raise ValueError("aspect must be one of %s" % ", ".join(ASPECTS))
     if style not in STYLES:
@@ -1545,6 +1748,11 @@ def _check_args(j):
         raise ValueError("--crop applies to the background capture; crop panel images before passing them")
     if j.band_pos not in BANDS:
         raise ValueError("band must be one of %s" % ", ".join(BANDS))
+    if j.backdrop not in BACKDROPS:
+        raise ValueError("backdrop must be one of %s" % ", ".join(BACKDROPS))
+    if j.backdrop == "solid" and panels:
+        j.info["notes"].append("--backdrop solid is ignored with --panel: comparison panels fill the frame")
+        j.backdrop = "fade"
     if crop is not None and (len(crop) != 4 or not all(0 <= v <= 1 for v in crop)
                              or crop[0] >= crop[2] or crop[1] >= crop[3]):
         raise ValueError("--crop takes x0,y0,x1,y1 as fractions of the capture, 0 to 1")
@@ -1586,6 +1794,8 @@ def _load_sources(j):
     info["source"] = backgrounds[0].size
     cropped = layout == "single" and crop_px is not None
     cv = Canvas(*pick_size(backgrounds, layout, j.size, j.aspect, cropped))
+    if j.mode == "post":  # a message needs a wider column beside the image than a few words do
+        cv.col_share = POST_COL_SHARE
     info["size"] = (cv.w, cv.h)
     narrow = layout == "single" and is_narrow(src, cv.w, cv.h, cropped)
     j.panels, j.subjects, j.src, j.inset_box, j.layout, j.crop_px = panels, subjects, src, inset_box, layout, crop_px
@@ -1618,6 +1828,13 @@ def _side_for_box(j):
     wider = not j.narrow and src.width / src.height > (cv.w / cv.h) * 1.1
     scores = {}
     for side in ("left", "right"):
+        if j.backdrop == "solid":  # the photo beside the panel, cropped to center the box: how much stays in it
+            rect = solid_rect(cv, None, None, side)
+            f = j.focus if j.focus is not None else focus_on(box, src, rect[2] - rect[0], rect[3] - rect[1])
+            mapper = solid_view(src, rect, f, vfocus_in(box, src, rect, rect))[0]
+            inside, v, _ = box_cover(box_rect(box, mapper), cv, region=rect)
+            scores[side] = inside * v
+            continue
         f = j.focus if j.focus is not None else (focus_away(box, src, cv, side) if wider else 0.5)
         mapper, vis = wide_view(src, cv, side, f, j.feather, j.shade, j.cropped)
         inside, v, _ = box_cover(box_rect(box, mapper), cv, vis_x=vis)
@@ -1663,7 +1880,10 @@ def _choose_layout(j):
     # --push only ever softens the photo behind a cut-out; a channel file's push must not blur plain captures
     push = (0.5 if push is None else push) if subjects else 0.0
     focus_eff = focus
-    if focus is None and cv.tall and j.subject_box is not None:  # the face wins over an inset on tall crops
+    solid = j.backdrop == "solid"
+    if solid:
+        pass  # the crop is placed within the photo rect once the type is set (_pick_anchor, _solid_layout)
+    elif focus is None and cv.tall and j.subject_box is not None:  # the face wins over an inset on tall crops
         focus_eff = focus_on(j.subject_box, src, cv.w, cv.h)
         info["notes"].append("crop centers --subject-box%s (focus %.2f); set --focus to override"
                              % (" rather than the inset" if inset is not None else "", focus_eff))
@@ -1680,7 +1900,7 @@ def _choose_layout(j):
             share = (cv.w / max(cv.w / src.width, cv.h / src.height)) / src.width
             focus_eff = side_focus(src, share, text_side)
             info["notes"].append("crop follows the subject (focus %.2f); set --focus to override" % focus_eff)
-    if cv.tall and j.subject_box is not None:
+    if cv.tall and j.subject_box is not None and not solid:
         j.vfocus = vfocus_on(j.subject_box, src, cv)
     j.anchor, j.text_side, j.bg, j.push, j.focus_eff = anchor, text_side, bg, push, focus_eff
 
@@ -1829,16 +2049,18 @@ def _type_room(j):
         max_w, base = cv.col_w, 150
         avail = min(safe[3] - safe[1], int(0.8 * ph) - 2 * cv.px(40))
     elif cv.tall:
-        max_w, base = cv.col_w, 190
-        avail = safe[3] - safe[1] if anchor == "bottom" else int(min(safe[3] - safe[1], cv.h * 0.42))
+        max_w, base = cv.col_w, (POST_BIG_BASE if j.mode == "post" else 190)
+        avail = _tall_avail(j, safe, anchor)
     elif layout == "panels":
         max_w, base = int(cv.w * 0.56), 110
         avail = min(cv.h - cv.px(64) - cv.px(150), int(cv.h * 0.36))  # the panels stay the picture
     else:
-        max_w, base = cv.col_w, 190
-        bottom_limit = cv.timestamp_zone[1] - cv.px(12) if text_side == "right" else safe[3]
+        max_w, base = cv.col_w, (POST_BIG_BASE if j.mode == "post" else 190)
+        # a post image has no duration badge, so its type may use the bottom-right corner
+        bottom_limit = (cv.timestamp_zone[1] - cv.px(12) if text_side == "right" and j.mode != "post"
+                        else safe[3])
         avail = bottom_limit - safe[1]
-        if inset is not None and not narrow:  # keep the type in the room beside the inset
+        if inset is not None and not narrow and j.backdrop != "solid":  # keep the type in the room beside the inset
             ib = inset_box or (0.25, 0.25, 0.75, 0.75)
             sc = max(cv.w / src.width, cv.h / src.height)
             sx = (src.width - cv.w / sc) * (0.5 if focus_eff is None else focus_eff)
@@ -1849,9 +2071,70 @@ def _type_room(j):
     j.safe, j.rects, j.div, j.max_w, j.base, j.avail, j.bottom_limit = safe, rects, div, max_w, base, avail, bottom_limit
 
 
+def _tall_avail(j, safe, anchor):
+    """Height the type block may take on a tall single-image canvas with the band at `anchor`. A thumbnail's
+    bottom band may fill the safe height (its few words never do); a top band (above a cut-out) stops at
+    42% of the frame. A 4:5 post's band, padding included, leaves the image POST_IMAGE_SHARE of the frame;
+    on 9:16 the Reels safe zone already keeps the text in the middle half."""
+    cv = j.cv
+    if j.mode == "post" and not cv.reels:
+        pad = cv.px(40)  # tall_band's padding around the block
+        edge = safe[3] - pad - cv.h * POST_IMAGE_SHARE if anchor == "bottom" else \
+            cv.h * (1 - POST_IMAGE_SHARE) - pad - (safe[1] + cv.px(16))
+        return int(min(safe[3] - safe[1], edge))
+    return safe[3] - safe[1] if anchor == "bottom" else int(min(safe[3] - safe[1], cv.h * 0.42))
+
+
+def _post_sizes(j, body_cap):
+    """Body and details font sizes for a body cap height of body_cap px at the feed width: the smallest
+    size whose capital H is at least that tall, so a size that passes the floor measures as passing."""
+    k = j.cv.w / float(POST_FEED_WIDTH[j.aspect])
+    details_cap = max(body_cap - POST_DETAILS_DROP, min(body_cap, POST_MIN_CAP))
+
+    def size_for(feed_cap):
+        want = feed_cap * k
+        s = max(6, int(want / j.post_ratio))
+        while cap_metrics(load_font(j.lspec, s), "H")[0] < want - 1e-6 and s < 4 * want:
+            s += 1
+        return s
+    return size_for(body_cap), size_for(details_cap)
+
+
+def _fit_post(j, avail):
+    """Post text: the stack at the largest size that fits avail, shrinking the headline first (from j.base to
+    POST_BIG_MIN), then the body and details together, half a feed pixel of cap height at a time. Below
+    POST_MIN_CAP it keeps shrinking so no word is cut or pushed off the frame (_check_post warns), down to
+    POST_LAST_CAP. Returns what _fit_block returns and records the laid-out text in j.post_fit."""
+    if j.post_ratio is None:
+        j.post_ratio = max(0.3, cap_metrics(load_font(j.lspec, 200), "H")[0] / 200.0)
+    caps = [POST_BODY_CAP]
+    if j.body or j.details:
+        while caps[-1] - 0.5 >= POST_LAST_CAP - 1e-9:
+            caps.append(round(caps[-1] - 0.5, 2))
+    big_min = min(j.base, POST_BIG_MIN)
+    stack = j.lead == "label" and "·" in j.label
+    for n, body_cap in enumerate(caps):
+        bs, ds = _post_sizes(j, body_cap)
+        extra, log = post_items(j.lspec, j.body, j.details, j.max_w, bs, ds)
+        cap = j.base if n == 0 else big_min  # once the body shrinks, the room it frees stays with the body
+        while True:
+            items, bw, bh, big_size = text_block(j.cv, j.big, j.box, j.kicker, j.subtitle, j.tspec, j.lspec,
+                                                 j.tracking_em, j.accent_rgba, j.logo, j.logo_big, j.max_w,
+                                                 stack=stack, max_size=cap, big_name=j.big_name,
+                                                 big_color=j.big_rgb + (255,), box_first=True, extra=extra)
+            if bh <= avail or (cap <= big_min and n == len(caps) - 1):
+                j.post_fit = {"body_cap": body_cap, "sizes": {"body": bs, "details": ds}, "lines": log}
+                return items, bw, bh, big_size, cap
+            if cap <= big_min:
+                break
+            cap = max(big_min, int(cap * 0.88))
+
+
 def _fit_block(j, avail):
     """The type block at the largest size (from j.base down) whose height fits avail.
     Returns (items, width, height, big size, size cap used)."""
+    if j.mode == "post":
+        return _fit_post(j, avail)
     cap = j.base
     while True:
         items, bw, bh, big_size = text_block(j.cv, j.big, j.box, j.kicker, j.subtitle, j.tspec, j.lspec,
@@ -1880,13 +2163,13 @@ def box_region(cv):
     return None
 
 
-def _band_measure(j, mapper, vis):
+def _band_measure(j, mapper, vis, region=None):
     """How a tall type band leaves --subject-box: (score, inside, visibility, heavy). inside is its share in
-    view (Reels: the safe zone); visibility and heavy cover the whole box. The score is inside x the
-    visibility of the box's middle rows (35-75% of its height: eyes to mouth on a face), so shade on hair
-    and forehead counts for little."""
+    view (Reels: the safe zone; region overrides it, e.g. the photo rect with --backdrop solid); visibility
+    and heavy cover the whole box. The score is inside x the visibility of the box's middle rows (35-75% of
+    its height: eyes to mouth on a face), so shade on hair and forehead counts for little."""
     rect = box_rect(j.subject_box, mapper)
-    inside, v, heavy = box_cover(rect, j.cv, vis_y=vis, region=box_region(j.cv))
+    inside, v, heavy = box_cover(rect, j.cv, vis_y=vis, region=region or box_region(j.cv))
     h = rect[3] - rect[1]
     middle = box_cover((rect[0], rect[1] + 0.35 * h, rect[2], rect[1] + 0.75 * h), j.cv, vis_y=vis)[1]
     return inside * middle, inside, v, heavy
@@ -1899,23 +2182,38 @@ def _pick_anchor(j):
     cv = j.cv
     if not (cv.tall and j.layout == "single" and j.subject_box is not None):
         return
+    solid = j.backdrop == "solid"
     focus = j.focus_eff
-    if focus is None:
+    if focus is None and not solid:
         focus = subject_focus(j.src, (cv.w / max(cv.w / j.src.width, cv.h / j.src.height)) / j.src.width)
     default = j.vfocus  # the box center at 40% of the height, or None when nothing is cropped vertically
-    grid = [default] if default is None else [default] + [i / 50.0 for i in range(51)]
     scores = {}
     for anchor in ("bottom", "top"):
-        avail = j.safe[3] - j.safe[1] if anchor == "bottom" else int(min(j.safe[3] - j.safe[1], cv.h * 0.42))
+        avail = _tall_avail(j, j.safe, anchor)
         band = tall_band(cv, j.safe, _fit_block(j, avail)[2], anchor)[1]
-        ms = [(vf,) + _band_measure(j, *tall_view(j.src, cv, focus, vf, j.shade, band, anchor)) for vf in grid]
+        if solid:  # the photo takes the rect beside the panel: the crop centers the box in its visible part
+            rect = solid_rect(cv, band, anchor, j.text_side)
+            region = solid_region(cv, rect)
+            f = _solid_focus(j, rect)
+            dflt = vfocus_in(j.subject_box, j.src, rect, region)
+            rows = span_mask(cv.h, rect[1], rect[3])
+
+            def view(vf, f=f, rect=rect, rows=rows, region=region):
+                return solid_view(j.src, rect, f, vf)[0], rows, region
+        else:
+            f, dflt = focus, default
+
+            def view(vf, band=band, anchor=anchor):
+                return tall_view(j.src, cv, focus, vf, j.shade, band, anchor)
+        grid = [dflt] if dflt is None else [dflt] + [i / 50.0 for i in range(51)]
+        ms = [(vf,) + _band_measure(j, *view(vf)) for vf in grid]
         best = max(m[1] for m in ms)
         if ms[0][1] >= best - 0.02:  # the default crop is as good: keep it
             pick = ms[0]
         else:  # the best crop, nearest the default
-            pick = min((m for m in ms if m[1] >= best - 0.005), key=lambda m: abs(m[0] - default))
+            pick = min((m for m in ms if m[1] >= best - 0.005), key=lambda m, d=dflt: abs(m[0] - d))
         scores[anchor] = {"vfocus": pick[0], "score": pick[1], "inside": pick[2], "visibility": pick[3],
-                          "heavy": pick[4], "avail": avail}
+                          "heavy": pick[4], "avail": avail, "focus": f, "default": dflt}
     j.band_scores = scores
     if not j.band_forced and j.anchor == "bottom" and scores["top"]["score"] >= scores["bottom"]["score"] + BAND_MARGIN:
         j.anchor, j.avail = "top", scores["top"]["avail"]
@@ -1923,7 +2221,12 @@ def _pick_anchor(j):
         j.info["notes"].append("type band at the top, clear of --subject-box (%d%% of its middle in view there, "
                                "%d%% at the bottom)" % (round(100 * scores["top"]["score"]),
                                                         round(100 * scores["bottom"]["score"])))
-    if scores[j.anchor]["vfocus"] != default:
+    if solid:
+        j.focus_eff = scores[j.anchor]["focus"]
+        if j.focus is None:
+            j.info["notes"].append("crop centers --subject-box in the photo (focus %.2f); set --focus to override"
+                                   % j.focus_eff)
+    if scores[j.anchor]["vfocus"] != scores[j.anchor]["default"]:
         j.info["notes"].append("crop moved up or down to keep --subject-box clear of the type band (vertical focus "
                                "%.2f)" % scores[j.anchor]["vfocus"])
     j.vfocus = scores[j.anchor]["vfocus"]
@@ -1988,6 +2291,44 @@ def _place_band(j):
     j.top, j.band = top, band
 
 
+def _solid_focus(j, rect):
+    """--backdrop solid: the horizontal crop position within the photo rect. --focus wins; then --subject-box
+    (centered in the rect), then the inset; None leaves it to compose_solid (the busiest window)."""
+    if j.focus is not None:
+        return j.focus
+    rw, rh = rect[2] - rect[0], rect[3] - rect[1]
+    if j.subject_box is not None:
+        return focus_on(j.subject_box, j.src, rw, rh)
+    if j.inset is not None:
+        return focus_on(j.inset_box or (0.25, 0.25, 0.75, 0.75), j.src, rw, rh)
+    return None
+
+
+def _solid_layout(j):
+    """--backdrop solid: the photo's rectangle beside the type panel and the crop within it (_pick_anchor has
+    already placed it on tall canvases with --subject-box). Sets info["backdrop"] and info["image_rect"]."""
+    if j.backdrop != "solid":
+        return
+    cv, src, info = j.cv, j.src, j.info
+    rect = solid_rect(cv, j.band, j.anchor, j.text_side)
+    j.image_rect = rect
+    rw, rh = rect[2] - rect[0], rect[3] - rect[1]
+    if j.band_scores is None:
+        j.focus_eff = _solid_focus(j, rect)
+        if j.subject_box is not None:
+            j.vfocus = vfocus_in(j.subject_box, src, rect, solid_region(cv, rect))
+            if j.focus is None:
+                info["notes"].append("crop centers --subject-box in the photo (focus %.2f); set --focus to override"
+                                     % j.focus_eff)
+    if j.focus_eff is None:  # the busiest window of the capture: where the subject is
+        j.focus_eff = subject_focus(src, (rw / max(rw / src.width, rh / src.height)) / src.width)
+    if abs(j.shade - 0.88) > 1e-9 or abs(j.feather - 0.36) > 1e-9:
+        info["notes"].append(SOLID_IDLE_NOTE)
+    info["backdrop"] = "solid"
+    info["image_rect"] = tuple(int(v) for v in rect)
+    info["backdrop_color"] = hexcolor(j.bg)
+
+
 def _build(j, shade_now):
     """Compose the picture at one shade and draw the type over it; returns this build's state and warnings."""
     layout, panels, cv, bg, band, src, focus_eff, push = j.layout, j.panels, j.cv, j.bg, j.band, j.src, j.focus_eff, j.push
@@ -2000,6 +2341,10 @@ def _build(j, shade_now):
         canvas, scales = compose_panels(panels, cv, bg, shade_now, top_shade=not cv.tall and bool(j.panel_labels),
                                         band_top=band[0], band=band)
         out["scales"], scale = scales, max(scales)
+    elif j.backdrop == "solid":  # no shade: the type sits on the opaque panel
+        canvas, scale, mapper = compose_solid(src, cv, bg, j.image_rect, focus_eff, j.vfocus, push)
+        if subjects and push > 0:
+            tex = compose_solid(src, cv, bg, j.image_rect, focus_eff, j.vfocus, 0.0)[0]
     elif cv.tall:
         canvas, scale, mapper = compose_tall(src, cv, bg, focus_eff, shade_now, push, band, anchor, j.vfocus)
         if subjects and push > 0:
@@ -2011,10 +2356,10 @@ def _build(j, shade_now):
             tex = compose_single(src, cv, text_side, bg, fx, j.feather, shade_now, 0.0, j.cropped)[0]
     if inset is not None:
         canvas, out["inset"], out["inset_rect"] = place_inset(canvas, inset, inset_box or (0.25, 0.25, 0.75, 0.75),
-                                                              mapper, cv, w)
+                                                              mapper, cv, w, clip=j.image_rect)
     if subjects:
         canvas, out["subjects"], out["mask"] = place_subjects(canvas, subjects, cv, text_side, w,
-                                                              band if cv.tall else None, tex)
+                                                              band if cv.tall else None, tex, area=j.image_rect)
     layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     align = "center" if layout == "panels" and not cv.tall else ("left" if cv.tall else text_side)
     bbox, elements = draw_block(layer, j.items, j.bw, j.bh, cv, align, j.top)
@@ -2043,7 +2388,7 @@ def _compose(j):
     warnings = info["warnings"]
     built = _build(j, shade)
     targets = {c[0] for c in built["contrast"] if _fixable(c)}
-    if shade < 0.97 and targets:
+    if shade < 0.97 and targets and j.backdrop != "solid":  # a solid panel has no shade to raise
         darker = _build(j, 0.97)  # light type on a bright patch: darken the type area once more
         # judged only on the elements darkening is meant to fix; a dark --accent gets its own warning
         if _worst(darker, targets) > _worst(built, targets) + 0.05:
@@ -2184,19 +2529,26 @@ def _check_subject_box(j):
     cv, built, info = j.cv, j.built, j.info
     warnings = info["warnings"]
     rect = box_rect(j.subject_box, built["mapper"])
-    if cv.tall:
+    solid = j.backdrop == "solid"
+    ir = j.image_rect
+    if solid:  # no shade: visibility is the share in the photo rect; a box in the panel is out of view
+        vis_x, vis_y = span_mask(cv.w, ir[0], ir[2]), span_mask(cv.h, ir[1], ir[3])
+        region = solid_region(cv, ir)
+    elif cv.tall:
         vis_x, vis_y = None, 1 - band_alpha(cv, built["shade"], j.band, j.anchor)
+        region = box_region(cv)
     else:
         fx = 0.5 if j.focus_eff is None else j.focus_eff
         vis_x, vis_y = wide_view(j.src, cv, j.text_side, fx, j.feather, built["shade"], j.cropped)[1], None
-    region = box_region(cv)
+        region = box_region(cv)
     inside, vis, heavy = box_cover(rect, cv, vis_x, vis_y, region)
-    x0, y0 = int(round(max(0, rect[0]))), int(round(max(0, rect[1])))
-    x1, y1 = int(round(min(cv.w, rect[2]))), int(round(min(cv.h, rect[3])))
+    shown = (max(rect[0], ir[0]), max(rect[1], ir[1]), min(rect[2], ir[2]), min(rect[3], ir[3])) if solid else rect
+    x0, y0 = int(round(max(0, shown[0]))), int(round(max(0, shown[1])))
+    x1, y1 = int(round(min(cv.w, shown[2]))), int(round(min(cv.h, shown[3])))
     glyphs = 0.0
     if x1 > x0 and y1 > y0:
         glyphs = float((np.asarray(built["layer"].getchannel("A"))[y0:y1, x0:x1] > 128).mean())
-    under_type = _under_type(rect, [b for _, b in built["elements"]], cv)
+    under_type = _under_type(shown, [b for _, b in built["elements"]], cv) if x1 > x0 and y1 > y0 else 0.0
     info["subject_box"] = {"box": tuple(round(v, 4) for v in j.subject_box),
                            "rect": tuple(int(round(v)) for v in rect), "inside": round(inside, 3),
                            "visibility": round(vis, 3), "heavy": round(heavy, 3), "glyphs": round(glyphs, 3),
@@ -2207,7 +2559,22 @@ def _check_subject_box(j):
         rg = region or (0, 0, cv.w, cv.h)
         across = max(0.0, min(rect[2], rg[2]) - max(rect[0], rg[0])) / (rect[2] - rect[0])
         down = max(0.0, min(rect[3], rg[3]) - max(rect[1], rg[1])) / (rect[3] - rect[1])
-        if down < across and cv.tall:  # cut at the top or bottom: --focus only moves the crop sideways
+        if solid:
+            where = "in the photo, clear of the type panel%s" % (
+                " and inside the Reels/Shorts safe zone" if cv.reels else "")
+            flip = ("top" if j.anchor == "bottom" else "bottom") if cv.tall else None
+            m = (j.band_scores or {}).get(flip) if flip else None
+            if m and m["inside"] >= 0.9:
+                fix = "use --band %s, which keeps it in the photo" % flip
+            elif cv.tall and down < across:
+                fix = ("the photo %s the type panel is too short for it; shorten the text or use a frame with more "
+                       "room around the subject" % ("above" if j.anchor == "bottom" else "below"))
+            elif cv.tall:
+                fix = "move the crop with --focus (0 = left edge, 1 = right edge) or tighten --crop around it"
+            else:
+                fix = ("move the crop with --focus (0 = left edge, 1 = right edge), tighten --crop around it, or use "
+                       "--text-side %s" % ("right" if j.text_side == "left" else "left"))
+        elif down < across and cv.tall:  # cut at the top or bottom: --focus only moves the crop sideways
             fix = ("it sits too %s in the capture for this format; use a frame with more room %s the subject"
                    % (("high", "above") if rect[1] < rg[1] else ("low", "below")))
         elif cv.tall:
@@ -2215,11 +2582,14 @@ def _check_subject_box(j):
         else:
             fix = _focus_fix(j) or "check --focus and --crop"
         warnings.append("only %d%% of --subject-box is %s: %s." % (int(inside * 100), where, fix))
-    shade_bad = x1 > x0 and y1 > y0 and (vis < 0.7 or heavy > 0.2)
+    # a solid backdrop shades nothing: a box reaching into the panel is out of view, warned about above
+    shade_bad = not solid and x1 > x0 and y1 > y0 and (vis < 0.7 or heavy > 0.2)
     overlap_bad = glyphs > 0.02 or under_type > 0.10
     if not (shade_bad or overlap_bad):
         return
-    if cv.tall:
+    if solid:
+        shade_fix = overlap_fix = "shorten the text, or move the subject with --focus or --crop"
+    elif cv.tall:
         flip = "top" if j.anchor == "bottom" else "bottom"
         m, here = (j.band_scores or {}).get(flip), (j.band_scores or {}).get(j.anchor)
         clears = m and m["inside"] >= 0.9 and m["visibility"] >= 0.7 and m["heavy"] <= 0.2
@@ -2236,6 +2606,47 @@ def _check_subject_box(j):
             "band" if cv.tall else "shade", j.aspect, round(100 * heavy), round(100 * vis), shade_fix))
     if overlap_bad:
         warnings.append("the type overlaps --subject-box on %s: %s." % (j.aspect, overlap_fix))
+
+
+def _check_post(j):
+    """Posts: record the body and details as laid out (info["post_text"]: per slot the font size, cap height
+    at master size and at the phone feed width, and the lines), confirm every word is there in order, and
+    warn when either reads below POST_MIN_CAP at that width, naming the fix. The text is never cut."""
+    info, cv, pf = j.info, j.cv, j.post_fit
+    feed_w = POST_FEED_WIDTH[j.aspect]
+    k = feed_w / float(cv.w)
+    out = {"feed_width": feed_w, "min_cap": POST_MIN_CAP}
+    low = []
+    for name, text in (("body", j.body), ("details", j.details)):
+        if not text:
+            continue
+        lines = pf["lines"][name]
+        if post_words(" ".join(lines)) != post_words(text):  # wrapping only breaks between words
+            info["warnings"].append("the %s was not laid out word for word (a bug): check the image against the "
+                                    "text." % name)
+        size = pf["sizes"][name]
+        cap = cap_metrics(load_font(j.lspec, size), "H")[0]
+        feed_cap = cap * k
+        out[name] = {"size": size, "cap": int(cap), "feed_cap": int(feed_cap * 10) / 10.0, "lines": list(lines)}
+        if feed_cap < POST_MIN_CAP - 1e-6:
+            low.append((name, feed_cap))
+    info["post_text"] = out
+    if not low:
+        return
+    fixes = ["shorten the text"]
+    if j.logo is None and len(post_words(j.title)) > 6:
+        fixes.append("keep --title to a short headline and move the rest into --body")
+    elif not (j.body and j.details):
+        fixes.append("split it into a short --title headline, the message in --body and when/where in --details")
+    if j.aspect == "16:9":
+        fixes.append("use --aspect 4:5, which gives the text more room")
+    elif j.aspect == "9:16":
+        fixes.append("use --aspect 4:5, which has more room for text")
+    fix = fixes[0] if len(fixes) == 1 else ", ".join(fixes[:-1]) + ", or " + fixes[-1]
+    where = "%d px wide %s" % (feed_w, "Reels/Stories screen" if cv.reels else "phone feed card")
+    what = " and ".join("%s %.1f px" % (n, int(c * 10) / 10.0) for n, c in low)
+    info["warnings"].append("post text too small to read on a %s: cap height %s, want %.0f px or more: %s. Don't "
+                            "cut the user's words to fix it without asking." % (where, what, POST_MIN_CAP, fix))
 
 
 def _check_result(j):
@@ -2272,7 +2683,9 @@ def _check_result(j):
             warnings.append("the %s has %.1f:1 contrast (want %.1f:1 or more): its color is too dim to read "
                             "even on black; %s." % (name, ratio, MIN_CONTRAST, fix))
         elif light:
-            if cv.tall:
+            if j.backdrop == "solid":
+                hint = "use a darker --bg"
+            elif cv.tall:
                 hint = "use --focus to move the crop, or a darker image"
             elif narrow:
                 hint = "use --text-side %s or a darker --bg" % ("right" if text_side == "left" else "left")
@@ -2291,7 +2704,7 @@ def _check_result(j):
                             "background; %s." % (name, ratio, MIN_CONTRAST, fix))
     info["text_box"] = bbox
     # (name, (x0, y0, x1, y1)) per drawn line or box: "title" or "hook" (one per line), "label box",
-    # "kicker", "subtitle", "logo", "panel label N"
+    # "kicker", "subtitle", "logo", "panel label N"; posts add "body" and "details" (one per line)
     info["elements"] = [(name, tuple(int(v) for v in b)) for name, b in built["elements"] + built["label_elements"]]
 
     frame = cv.frame_box
@@ -2309,13 +2722,16 @@ def _check_result(j):
         if glyphs.any() and hit > 0.02 * glyphs.sum():
             warnings.append("the type overlaps the subject: shorten the text%s." %
                             ("" if cv.tall else " or use --text-side"))
-    if overlaps(bbox, cv.timestamp_zone):
-        warnings.append("type reaches the bottom-right corner, where YouTube's duration badge sits.")
-    title_words = [] if logo is not None else split_lines(title)
-    words = " ".join([kicker] + title_words + [subtitle, label] + list(panel_labels or []))
-    n_words = len(words.replace("·", " ").split())
-    if n_words > 8:
-        warnings.append("%d words of type; keep it to 8 or fewer so it reads at sidebar size." % n_words)
+    if j.mode == "post":  # no duration badge on a post image, and no word cap: the message is the text
+        _check_post(j)
+    else:
+        if overlaps(bbox, cv.timestamp_zone):
+            warnings.append("type reaches the bottom-right corner, where YouTube's duration badge sits.")
+        title_words = [] if logo is not None else split_lines(title)
+        words = " ".join([kicker] + title_words + [subtitle, label] + list(panel_labels or []))
+        n_words = len(words.replace("·", " ").split())
+        if n_words > 8:
+            warnings.append("%d words of type; keep it to 8 or fewer so it reads at sidebar size." % n_words)
     _check_subject_box(j)
     info["warnings"] = list(dict.fromkeys(warnings))  # drop exact repeats, keep order
 
@@ -2324,9 +2740,26 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
            text_side="auto", focus=None, accent="#ffffff", bg=None, feather=0.36, shade=0.88,
            title_font=None, label_font=None, logo=None, logo_white=False, size="auto",
            panels=None, panel_labels=None, subjects=None, push=None, inset=None, inset_box=None,
-           aspect="16:9", title_color="white", crop=None, title_tracking=None, subject_box=None,
-           system_fonts=False, band="auto"):
+           aspect=None, title_color="white", crop=None, title_tracking=None, subject_box=None,
+           system_fonts=False, band="auto", mode="thumbnail", body="", details="", backdrop="fade"):
     """Return (thumbnail at master size, info dict with warnings and measurements).
+
+    backdrop is what sits behind the type: "fade" (default) runs the photo under it, shaded toward the type;
+    "solid" keeps the photo clean in its own rectangle (cover-cropped, focus and subject_box steering the crop)
+    and sets the type on an opaque panel of bg, with a hard straight edge between them. On 4:5 and 9:16 the
+    panel runs from the type band's outer edge to the canvas edge on that side; on 16:9 it takes the type
+    column plus one margin. shade and feather do nothing with solid; panels ignore it. A solid render adds
+    info["backdrop"] = "solid", info["image_rect"] (the photo's x0, y0, x1, y1 in canvas px) and
+    info["backdrop_color"] (the panel's #rrggbb).
+
+    mode="post" makes a standalone feed post, whose image text is the message: body (a paragraph, wrapped to
+    the type column; '\\n' breaks a line, a blank line starts a paragraph) and details (when, where, how;
+    parts joined with " · ") are laid out word for word in the label font under the headline (title), with
+    the label box above it as a tag. The block shrinks the headline first, then the body; nothing is cut,
+    and info["post_text"] reports the sizes and lines, with a warning when the body or details fall below
+    POST_MIN_CAP px of cap height at the phone width (POST_FEED_WIDTH). Aspect defaults to 4:5 for a post
+    (16:9 for a thumbnail); a 4:5 post band leaves the image 45% of the frame, a 16:9 post column takes
+    half the width, and there is no word-count or duration-badge check.
 
     lead="title": the title is the big type and the label goes in the box.
     lead="label": the label is the big type (split at " · ") and the title goes in the box.
@@ -2342,13 +2775,18 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
     installed faces first (Bodoni MT, Bahnschrift, Didot...), as up to v0.7.0. title_font and label_font
     always win. band ("auto", "top", "bottom") sets where the type band goes on 4:5 and 9:16 (a single
     capture without a cut-out); auto keeps it at the bottom unless the top keeps subject_box clearly more in view."""
+    if aspect is None:
+        aspect = "4:5" if mode == "post" else "16:9"
+    info = {"warnings": [], "notes": [], "lead": lead, "aspect": aspect}
+    if mode == "post":
+        info["mode"] = "post"
     j = Job(src=src, title=title, label=label, kicker=kicker, subtitle=subtitle, lead=lead, style=style,
             text_side=text_side, focus=focus, accent=accent, bg=bg, feather=feather, shade=shade,
             title_font=title_font, label_font=label_font, logo=logo, logo_white=logo_white, size=size,
             panels=panels, panel_labels=panel_labels, subjects=subjects, push=push, inset=inset,
             inset_box=inset_box, aspect=aspect, title_color=title_color, crop=crop, title_tracking=title_tracking,
-            subject_box=subject_box, system_fonts=system_fonts, band_pos=band,
-            info={"warnings": [], "notes": [], "lead": lead, "aspect": aspect})
+            subject_box=subject_box, system_fonts=system_fonts, band_pos=band, mode=mode, body=body,
+            details=details, backdrop=backdrop, info=info)
     _check_args(j)
     _load_sources(j)
     _choose_layout(j)
@@ -2359,6 +2797,7 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
     _pick_anchor(j)
     _fit_type(j)
     _place_band(j)
+    _solid_layout(j)
     _compose(j)
     _check_result(j)
     out = j.built["canvas"].convert("RGBA")
@@ -2658,10 +3097,11 @@ def export(thumb, stem, aspect="16:9"):
 
 DEFAULTS = dict(style="serif", text_side="auto", focus=None, accent="#ffffff", bg=None, feather=0.36, shade=0.88,
                 title_font=None, label_font=None, logo=None, logo_white=False, lead="ab", size="auto", push=None,
-                kicker="", aspect="16:9", title_color="white", title_tracking=None, system_fonts=False, band="auto")
+                kicker="", aspect="16:9", title_color="white", title_tracking=None, system_fonts=False, band="auto",
+                mode="thumbnail", backdrop="fade")
 PATH_KEYS = ("title_font", "label_font", "logo")
 CHOICES = {"style": sorted(STYLES), "text_side": ["auto", "left", "right"], "lead": ["title", "label", "ab"],
-           "band": list(BANDS),
+           "band": list(BANDS), "mode": list(MODES), "backdrop": list(BACKDROPS),
            "size": ["auto"] + sorted(SIZES)}
 FRACTIONS = ("focus", "feather", "shade", "push")
 
@@ -2779,6 +3219,12 @@ def main(argv=None):
     ap.add_argument("--lead", help="title, label, or ab: which one is big; ab renders both (default)")
     ap.add_argument("--kicker", help="small line above the big type (off unless given)")
     ap.add_argument("--subtitle", default="", help="small line under the big type")
+    ap.add_argument("--mode", help="thumbnail (default: a few words beside a video title) or post (a standalone "
+                    "feed post whose image is the message: one 4:5 image, --body and --details, every word kept)")
+    ap.add_argument("--body", default="", help="post mode: the message, word for word; wraps to the type column. "
+                    "\\n breaks a line, \\n\\n starts a paragraph")
+    ap.add_argument("--details", default="", help="post mode: when, where, price, how to act; parts joined with "
+                    "' · ', smaller than the body")
     ap.add_argument("--panel", action="append", help="comparison image; pass 2-3 times instead of a capture")
     ap.add_argument("--panel-label", action="append", help="label per panel, in the same order")
     ap.add_argument("--subject", action="append", help="cut-out in front of the background (transparent PNG)")
@@ -2797,6 +3243,9 @@ def main(argv=None):
     ap.add_argument("--text-side", help="auto, left or right (16:9)")
     ap.add_argument("--band", help="auto, top or bottom: where the type band goes on 4:5 and 9:16 (default auto: "
                     "the bottom, or the top when that keeps --subject-box clearly more in view)")
+    ap.add_argument("--backdrop", help="what sits behind the type: fade (default: the photo runs under it, shaded "
+                    "toward the type) or solid (the photo keeps its own rectangle and the type sits on an opaque "
+                    "panel of --bg, with a hard edge between them; --shade and --feather do nothing)")
     ap.add_argument("--focus", type=float, help="horizontal crop position, 0 to 1 (default: center on 16:9, "
                     "the subject on 4:5 and 9:16, the inset when there is one)")
     ap.add_argument("--aspect", help="16:9 (YouTube, default), 4:5 (Facebook/Instagram feed), 9:16 (Reels, "
@@ -2842,6 +3291,10 @@ def main(argv=None):
         s, channel_path = settings(args)
     except ValueError as e:
         ap.error(str(e))
+    post = s["mode"] == "post"
+    if (args.body.strip() or args.details.strip()) and not post:
+        ap.error("--body and --details are post text: add --mode post (a thumbnail keeps a few words and leaves "
+                 "the message to the video title)")
     if not args.title.strip() and not s["logo"]:
         ap.error("give --title (or a --logo)")
     if args.inset_box and not args.inset:
@@ -2854,8 +3307,12 @@ def main(argv=None):
         ap.error("give a capture, or two or more --panel images")
     if args.feed and not os.path.isdir(args.feed):
         ap.error("--feed folder not found: %s" % args.feed)
-    leads = ["title", "label"] if s["lead"] == "ab" and args.label else ["label" if s["lead"] == "label" else "title"]
-    aspects = s["aspect"].split(",")
+    # a post is one image: the title leads and 4:5 is the format unless the command line says otherwise; the
+    # channel file's lead and formats are for thumbnails
+    lead_choice = s["lead"] if not post or args.lead is not None else "title"
+    leads = (["title", "label"] if lead_choice == "ab" and args.label
+             else ["label" if lead_choice == "label" else "title"])
+    aspects = (s["aspect"] if not post or args.aspect is not None else "4:5").split(",")
     stem = output_stem(args.output, first)
 
     def norm(p):
@@ -2894,13 +3351,22 @@ def main(argv=None):
                       # cut out once: rembg would otherwise run again for every variant and format
                       subjects=[cut_out(open_image(p, "subject")) for p in args.subject or []] or None,
                       push=s["push"], inset=open_image(args.inset, "inset") if args.inset else None,
-                      inset_box=args.inset_box, crop=args.crop, subject_box=args.subject_box)
+                      inset_box=args.inset_box, crop=args.crop, subject_box=args.subject_box, mode=s["mode"],
+                      body=args.body, details=args.details, backdrop=s["backdrop"])
         src = open_image(args.capture, "capture") if args.capture else None
     except ValueError as e:
         ap.error(str(e))
     if channel_path:
         print("channel settings: %s" % channel_path)
-    if args.aspect is None and not (channel_path and "aspect" in load_channel(channel_path)):
+    saved = load_channel(channel_path) if channel_path else {}
+    if post:
+        if args.aspect is None and "aspect" in saved:
+            print("note: post mode renders 4:5 unless --aspect is given; the saved \"aspect\" (%s) in %s is for "
+                  "thumbnails" % (saved["aspect"], channel_path))
+        if args.lead is None and saved.get("lead", "title") != "title":
+            print("note: post mode renders one image with the title leading; the saved \"lead\" (%s) is for "
+                  "thumbnails (pass --lead to override)" % saved["lead"])
+    elif args.aspect is None and "aspect" not in saved:
         print("note: no saved formats, so 16:9 only. Save \"aspect\" (e.g. \"16:9,4:5\") in %s to set them "
               "once." % (channel_path or CHANNEL_FILE))
     thumbs, written = [], []
@@ -2928,7 +3394,17 @@ def main(argv=None):
                 round(100 * sb["inside"]), "in the safe zone" if aspect == "9:16" else "in frame",
                 round(100 * sb["visibility"]), round(100 * sb["heavy"]), round(100 * max(sb["glyphs"], sb["under_type"]))))
         print("title type: %s" % info["title_source"])
+        pt = info.get("post_text")
+        if pt is not None:
+            parts = ["%s %d px (cap %d px at %dx%d, %.1f px on the %d px %s), %d line%s" % (
+                n, pt[n]["size"], pt[n]["cap"], info["size"][0], info["size"][1], pt[n]["feed_cap"],
+                pt["feed_width"], "screen" if aspect == "9:16" else "phone feed", len(pt[n]["lines"]),
+                "" if len(pt[n]["lines"]) == 1 else "s") for n in ("body", "details") if n in pt]
+            print("post text: %s; reads from %.0f px cap at that width" % ("; ".join(parts) or "headline only",
+                                                                         pt["min_cap"]))
         print("colors: big type %s; label box %s" % (info["colors"]["big type"], info["colors"]["label box"]))
+        if info.get("backdrop") == "solid":
+            print("backdrop: solid (panel %s)" % info["backdrop_color"])
         for n in info["notes"]:
             print("note: " + n)
         for key in ("master", "copy"):
@@ -2939,7 +3415,7 @@ def main(argv=None):
         print("wrote %s" % files["preview"])
         for w in info["warnings"]:
             print("warning: " + w)
-    if len(leads) == 1 and s["lead"] == "ab":
+    if len(leads) == 1 and lead_choice == "ab":
         print("note: no --label, so only one variant")
     if args.feed:
         if not thumbs:
