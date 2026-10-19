@@ -3005,10 +3005,12 @@ def _solid_layout(j):
                                      % j.focus_eff)
     if j.focus_eff is None:  # the busiest window of the capture: where the subject is
         j.focus_eff = subject_focus(src, (rw / max(rw / src.width, rh / src.height)) / src.width)
-    # name the setting and its value, not a flag: it may come from the channel file (default: render's or the CLI's)
-    idle = ["%s %.2f" % (key, v) for key, v, dflt in (("shade", j.shade, (Job.shade, DEFAULTS["shade"])),
+    # name the setting and its value, not a flag: it may come from the channel file (default: render's or the CLI's).
+    # The auto shade was not set by anyone; 0.88 stays quiet because channel files written before v0.9.1 carry it.
+    idle = ["%s %.2f" % (key, v) for key, v, dflt in (("shade", j.shade, (Job.shade, DEFAULTS["shade"], 0.88)),
                                                       ("feather", j.feather, (Job.feather, DEFAULTS["feather"])))
-            if all(abs(v - d) > 1e-9 for d in dflt)]
+            if not (key == "shade" and j.shade_auto)
+            and all(abs(v - d) > 1e-9 for d in dflt if d is not None)]
     if idle:
         info["notes"].append(SOLID_IDLE_NOTE % (" and ".join(idle), "has" if len(idle) == 1 else "have"))
     info["backdrop"] = "solid"
