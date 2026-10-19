@@ -24,7 +24,7 @@ from test_thumb import (POST_BODY, POST_DETAILS, POST_LONG, busy_right, cutout, 
 
 BG = "#1c2430"
 BG_RGB = (0x1C, 0x24, 0x30)
-SOLID_NOTE = "with --backdrop solid, --shade and --feather have no effect"
+SOLID_NOTE = "no effect with --backdrop solid"
 
 
 def warm_photo(w=1920, h=1080):
