@@ -71,8 +71,9 @@ class TallInset(unittest.TestCase):
         _, info = thumb.render(self.bg, "FORBIDDEN WEST", "ON A CRT", inset=self.inset, inset_box=(0.3, 0.5, 0.7, 0.95),
                                lead="title", aspect="4:5", band="bottom")
         self.assertTrue(warned(info, "type overlaps the inset image: use --band top"), info["warnings"])
+        self.assertTrue(warned(info, "contrast"), info["warnings"])
         for w in warned(info, "contrast"):  # the bright inset under the type: the same fix, never --focus
-            self.assertIn("use --band top", w)
+            self.assertIn("use --band top, which keeps the type off it", w)
             self.assertNotIn("--focus", w)
         for w in info["warnings"]:
             self.assertNotIn("--text-side", w)
@@ -87,6 +88,9 @@ class TallInset(unittest.TestCase):
         self.assertTrue(warned(info, "type overlaps the inset image: use --inset-box"), info["warnings"])
         new = suggested(info, "--inset-box")
         self.assertIsNotNone(new, info["warnings"])
+        self.assertTrue(warned(info, "contrast"), info["warnings"])
+        for w in warned(info, "contrast"):  # light type on the bright inset: the inset fix, not a band or --focus
+            self.assertIn("use --inset-box %s" % thumb._fmt(new), w)
         self.assertAlmostEqual((new[2] - new[0]) / (new[3] - new[1]), (box[2] - box[0]) / (box[3] - box[1]), delta=0.1)
         _, info = thumb.render(self.bg, "FORBIDDEN WEST", "ON A CRT", inset=self.inset, inset_box=new, lead="title",
                                aspect="4:5")
@@ -100,6 +104,33 @@ class TallInset(unittest.TestCase):
         _, info = thumb.render(self.bg, "FORBIDDEN WEST", "ON A CRT", inset=self.inset, inset_box=(0.02, 0.2, 0.5, 0.8),
                                lead="title", size="720p", text_side="right")
         self.assertFalse(warned(info, "overlaps the inset"), info["warnings"])
+
+
+class TallContrastFix(unittest.TestCase):
+    """layout-1: light type on a bright patch on 4:5 names the fix that works there: the other band when a re-run
+    reads, --focus only when the capture is wider than the crop, darker captures for panels."""
+
+    @staticmethod
+    def hints(info):
+        return sorted({w.split("bright; ")[1] for w in info["warnings"] if "the background under it is bright" in w})
+
+    def render(self, src, **kw):
+        # no shade and a light --bg: the type can't be helped by the shade, only by moving or another image
+        _, info = thumb.render(src, "SIMON", "No hit", shade=0.0, bg="#e1e1e1", size="720p", lead="title",
+                               aspect="4:5", **kw)
+        return self.hints(info)
+
+    def test_each_case_names_its_own_fix(self):
+        half = np.full((1080, 1920, 3), 230, np.uint8)
+        half[:540] = 30  # dark at the top: the type reads in a top band
+        half = Image.fromarray(np.clip(half.astype(int) + np.random.default_rng(0).integers(-8, 8, half.shape),
+                                       0, 255).astype(np.uint8))
+        light = (230, 230, 230)
+        self.assertEqual(self.render(half), ["use --band top, where it reads."])
+        self.assertEqual(self.render(Image.new("RGB", (1920, 1080), light)),
+                         ["use --focus to move the crop, or a darker image."])
+        self.assertEqual(self.render(Image.new("RGB", (1080, 1350), light)), ["use a darker image."])  # shown whole
+        self.assertEqual(self.render(None, panels=[Image.new("RGB", (1920, 1080), light)] * 2), ["use darker captures."])
 
 
 class ReelsCutouts(unittest.TestCase):
@@ -190,6 +221,20 @@ class TallSubjectBoxCrop(unittest.TestCase):
     def test_box_under_the_band(self):
         self.check((0.47, 0.36, 0.51, 0.42), "FIRST LIGHT", "the type band darkens --subject-box")
 
+    def test_box_in_the_caption_area_gets_a_crop_and_band(self):
+        # a --crop that cuts the frame off above the box's row: the fix restores the height and moves the band up
+        box = (0.398, 0.482, 0.432, 0.528)
+        img = scene(2880, 1620, box=box, seed=4)
+        _, info = thumb.render(img, "X", subject_box=box, crop=(0.1, 0, 0.75, 0.62), aspect="9:16", lead="title")
+        w = warned(info, "of --subject-box is inside the Reels/Shorts safe zone")
+        self.assertEqual(len(w), 1, info["warnings"])
+        m = re.search(r"try --crop ([0-9.,]+) --band (top|bottom)\.", w[0])
+        self.assertIsNotNone(m, w[0])
+        crop, band = tuple(float(v) for v in m.group(1).split(",")), m.group(2)
+        _, info = thumb.render(img, "X", subject_box=box, crop=crop, band=band, aspect="9:16", lead="title")
+        self.assertEqual(warned(info, "--subject-box"), [])
+        self.assertGreaterEqual(info["subject_box"]["inside"], 0.9)
+
 
 class TallPanelLabels(unittest.TestCase):
     """layout-5: the lower panel's label doesn't read as one more line of the type stack."""
@@ -205,6 +250,11 @@ class TallPanelLabels(unittest.TestCase):
             apart = lab[0] != box[0] or lab[1] - box[3] > 4 * h
             self.assertTrue(apart, (aspect, box, lab))
             self.assertEqual(info["warnings"], [], aspect)
+            cv = thumb.Canvas(*info["size"])
+            if aspect == "4:5":  # the panel's bottom-left corner, where nothing else is
+                self.assertEqual((lab[0], lab[3]), (cv.margin, cv.h - cv.px(32)), lab)
+            else:  # the bottom of the safe zone, still next to the stack: right-aligned at the column's edge
+                self.assertEqual((lab[2], lab[3]), (cv.margin + cv.col_w, cv.safe_box[3] - cv.px(32)), lab)
 
 
 class ReelsCaptionShade(unittest.TestCase):
@@ -224,14 +274,14 @@ class OneNumber(unittest.TestCase):
     """layout-7: the warning and the 'subject box:' line print the same share."""
 
     def test_safe_zone_share_is_rounded_like_the_report(self):
-        box = (0.185, 0.12, 0.27, 0.245)  # 84% inside, stored as 0.8399...
+        box = (0.185, 0.121, 0.27, 0.245)  # 84.7% inside: rounds to 85, truncates to 84
         _, info = thumb.render(scene(1920, 1080, box=box), "BLACK FLAG", "NO HUD", subject_box=box, aspect="9:16",
                                lead="title")
         w = warned(info, "of --subject-box is inside")
         self.assertEqual(len(w), 1, info["warnings"])
         shown = int(re.search(r"only (\d+)%", w[0]).group(1))
         self.assertEqual(shown, round(100 * info["subject_box"]["inside"]))
-        self.assertEqual(shown, 84)
+        self.assertEqual(shown, 85)
 
 
 class IgnoredFlags(unittest.TestCase):

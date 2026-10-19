@@ -124,6 +124,17 @@ class LongWords(unittest.TestCase):
         self.assertLess(info["post_text"]["body"]["feed_cap"], thumb.POST_BODY_CAP)
         self.assertEqual(info["big_size"], ref["big_size"])  # the headline had the room: it keeps its size
 
+    def test_a_long_word_that_sets_the_size_is_named(self):
+        word = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789ABCDEFGH"  # fits the 9:16 column only below the readable size
+        _, info = thumb.render(dark(), "Saturday Cupping", mode="post", body="Use code %s at the till." % word,
+                               aspect="9:16")
+        self.assertEqual(info["post_text"]["body"]["overflow"], [])
+        self.assertIn(word, info["post_text"]["body"]["lines"])
+        small = [x for x in info["warnings"] if x.startswith("post text too small")]
+        self.assertEqual(len(small), 1, info["warnings"])
+        self.assertIn('it is set this small so "%s" fits the column: use --aspect 4:5' % word, small[0])
+        self.assertNotIn("shorten the text", small[0])
+
     def test_a_word_that_never_fits_is_named_and_kept(self):
         _, info = thumb.render(dark(), "REVIEWS", mode="post", body="x" * 400)
         self.assertEqual(info["post_text"]["body"]["lines"], ["x" * 400])
@@ -133,8 +144,13 @@ class LongWords(unittest.TestCase):
         self.assertIn('"xxxx', w[0])
         self.assertIn("wider than the column", w[0])
         self.assertIn("ask the user to approve a shorter form", w[0])
+        self.assertNotIn("--aspect 4:5", w[0])  # 4:5 already has the widest column
+        small = [x for x in info["warnings"] if x.startswith("post text too small")]
+        self.assertEqual(len(small), 1, info["warnings"])
+        self.assertIn('"xxxx', small[0])
+        self.assertIn("is still wider than the column at that size", small[0])
         no_cut_advice(self, info)
-        _, reels = thumb.render(dark(), "REVIEWS", mode="post", body="y" * 300, aspect="9:16")
+        _, reels =thumb.render(dark(), "REVIEWS", mode="post", body="y" * 300, aspect="9:16")
         w = [x for x in reels["warnings"] if x.startswith("the body runs outside the Reels/Shorts safe zone")]
         self.assertEqual(len(w), 1, reels["warnings"])
         self.assertIn("--aspect 4:5", w[0])
@@ -240,6 +256,9 @@ class TypedText(unittest.TestCase):
         self.assertEqual(info["post_text"]["body"]["lines"], [body])
         self.assertEqual(thumb.post_paragraphs("C:" + BS + "Users" + BS + "nina is home"),
                          [["C:" + BS + "Users" + BS + "nina is home"]])
+        # a relative or network path has no drive: any other backslash in the word still marks it as a path
+        self.assertEqual(thumb.post_paragraphs("Open logs" + BS + "new" + BS + "2026 today"),
+                         [["Open logs" + BS + "new" + BS + "2026 today"]])
         # a '\n' between words, after a colon or a full stop still breaks the line
         self.assertEqual(thumb.post_paragraphs("When:" + BS + "nSaturday. Free" + BS + "nDrop in"),
                          [["When:", "Saturday. Free", "Drop in"]])
@@ -298,3 +317,45 @@ class MissingGlyphs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FollowUps(unittest.TestCase):
+    """Fable's v0.9.1 leftovers: post text takes a light panel's ink, the post title's frame warning keeps the
+    user's words, and the stock channel file (aspect 16:9 only) prints no post-mode note."""
+
+    def test_post_text_takes_the_light_panels_ink(self):
+        _, info = thumb.render(dark(), "Hello", mode="post", body="Body text here.", details="Sat",
+                               backdrop="solid", bg="#f2efe8")
+        self.assertFalse(warned(info, "the body has"), info["warnings"])
+        self.assertFalse(warned(info, "the details has"), info["warnings"])
+        self.assertTrue(warned(info, "the --bg panel is light: use a dark --title-color"), info["warnings"])
+        self.assertFalse(warned(info, "use a darker --bg"), info["warnings"])
+        _, info = thumb.render(dark(), "Hello", mode="post", body="Body text here.", details="Sat",
+                               backdrop="solid", bg="#f2efe8", title_color="#111111")
+        self.assertFalse([w for w in info["warnings"] if "contrast" in w], info["warnings"])
+
+    def test_post_title_out_of_frame_never_says_shorten_it(self):
+        body = " ".join("word%d" % i for i in range(1, 401))
+        _, info = thumb.render(dark(), "Saturday Cupping", mode="post", aspect="9:16", body=body, details="Sat · Sun")
+        title = [w for w in info["warnings"] if w.startswith("the title runs outside")]
+        self.assertTrue(title, info["warnings"])
+        self.assertIn("don't cut the user's words without asking", title[0])
+        self.assertFalse([w for w in info["warnings"] if "shorten it" in w], info["warnings"])
+
+    def test_stock_channel_file_prints_no_post_note(self):
+        stock = os.path.join(ROOT, "skill", "clean-thumbnail", "references", "channel.example.json")
+        note = "post mode renders 4:5 unless --aspect is given"
+        with tempfile.TemporaryDirectory() as d:
+            dark().save(os.path.join(d, "cap.png"))
+            with open(stock, encoding="utf-8") as f, open(os.path.join(d, "clean-thumbnail.json"), "w",
+                                                         encoding="utf-8") as g:
+                g.write(f.read())
+            args = ["cap.png", "--mode", "post", "--title", "HI", "--body", "x y", "-o", "o3"]
+            code, text = run_cli(args, cwd=d)
+            self.assertEqual(code, 0, text)
+            self.assertNotIn(note, text)
+            with open(os.path.join(d, "clean-thumbnail.json"), "w", encoding="utf-8") as g:
+                json.dump({"aspect": "16:9,4:5"}, g)
+            code, text = run_cli(args, cwd=d)
+            self.assertEqual(code, 0, text)
+            self.assertIn(note, text)

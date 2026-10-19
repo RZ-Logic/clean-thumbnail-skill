@@ -349,8 +349,8 @@ class SolidContrast(unittest.TestCase):
         _, fade = thumb.render(white_photo, "SIMON", lead="title", text_side="left", bg=dark)
         self.assertGreater(solid["contrast"], fade["contrast"])  # the fade lets the bright photo through
 
-    def test_light_panel_says_use_a_darker_bg(self):
-        # white type on a light panel: shade cannot help, so no shade raise; the fix is the panel color
+    def test_light_panel_says_use_a_dark_title_color(self):
+        # white type on a light panel: shade cannot help, so no shade raise; the fix is a dark title color
         dark_photo = Image.new("RGB", (1920, 1080), (20, 20, 24))
         for aspect in ("16:9", "4:5"):
             _, info = thumb.render(dark_photo, "SIMON", lead="title", text_side="left" if aspect == "16:9" else "auto",
@@ -358,7 +358,7 @@ class SolidContrast(unittest.TestCase):
             self.assertLess(info["contrast"], thumb.MIN_CONTRAST)
             self.assertFalse(any("--shade" in n for n in info["notes"] if n != SOLID_NOTE), info["notes"])
             hits = [w for w in info["warnings"] if w.startswith("the title has")]
-            self.assertTrue(hits and "use a darker --bg" in hits[0], info["warnings"])
+            self.assertTrue(hits and "the --bg panel is light: use a dark --title-color" in hits[0], info["warnings"])
 
     def test_dark_title_on_dark_panel_warns(self):
         white_photo = Image.new("RGB", (1920, 1080), (250, 248, 240))

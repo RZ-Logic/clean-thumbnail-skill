@@ -44,7 +44,7 @@ try:
 except ImportError:
     ImageCms = None
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 SIZES = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440), "4k": (3840, 2160)}
 PHONE_SIZE = (1280, 720)
@@ -697,8 +697,13 @@ def is_light(color):
 
 def ink_for(bg):
     """Color of the small type that has no flag of its own (kicker, subtitle, post text): white, or near-black
-    on a light background."""
-    return INK_DARK if is_light(bg) else WHITE
+    on a light background, whichever has the higher contrast on bg (near-black is not black, so the crossover
+    sits a little above LIGHT_LUMINANCE)."""
+    if bg is None:
+        return WHITE
+    lum = float(wcag_luminance(np.array(bg[:3], dtype=np.float32) / 255.0))
+    ink_lum = float(wcag_luminance(np.array(INK_DARK, dtype=np.float32) / 255.0))
+    return INK_DARK if (lum + 0.05) / (ink_lum + 0.05) > 1.05 / (lum + 0.05) else WHITE
 
 
 # ---------------------------------------------------------------- layer matching
@@ -1735,8 +1740,8 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
     stack=True fits each big line on its own (capped at 1.6x the smallest), so a short
     first line leads a longer second one. Small lines shrink to fit max_w; they are drawn in the
     case given (_assign_roles sets it from the label font). ink is the color of the kicker,
-    subtitle and post text: white, or near-black on a light background (ink_for); None follows
-    the big type's polarity.
+    subtitle and post text: white, or near-black on a light background (ink_for); render passes it,
+    and None draws them white.
     Posts: box_first puts the boxed label above the big type, as a tag, and `extra` (post_items:
     body and details lines, already wrapped) follows the stack.
     Returns (items, block width, block height, big size)."""
@@ -1744,8 +1749,8 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
     lines = split_lines(big) if big else []
     tsize = cv.px(140)
     fonts = []
-    if ink is None:  # dark big type sits on a light background: so does the small type
-        ink = WHITE if big_color is None or is_light(big_color) else INK_DARK
+    if ink is None:
+        ink = WHITE
     if lines:
         font, tsize = fit_title(tspec, lines, tracking_em, max_w, cv, max_size)
         if len(lines) == 1 and " " in lines[0]:  # wrap at the middle space when it helps
@@ -1858,7 +1863,7 @@ def draw_block(layer, items, block_w, block_h, cv, align, top):
     return (int(x0), int(top), int(x0 + block_w), int(top + block_h)), elements
 
 
-def place_panel_labels(layer, canvas, cv, rects, labels, lspec, band, bg, warnings):
+def place_panel_labels(layer, canvas, cv, rects, labels, lspec, band, bg, warnings, caps=True):
     """Boxed labels inside their own panels, clear of the type band and of each other, inside the
     Reels safe zone where the panel allows; a soft scrim behind each keeps them readable on bright
     panels. Returns (canvas, [(element name, bbox)], names of labels already warned about)."""
@@ -1868,7 +1873,7 @@ def place_panel_labels(layer, canvas, cv, rects, labels, lspec, band, bg, warnin
     for i, ((x0, y0, x1, y1), name) in enumerate(zip(rects, labels or [])):
         if not name:
             continue
-        text = name.upper()
+        text = name.upper() if caps else name  # caps=False: a blackletter or script label font keeps its case
         avail_w = cv.col_w if cv.tall else (x1 - x0) - 2 * cv.px(36)
         font, trk = fit_small(lspec, text, cv.px(26), cv.px(16), avail_w, 5 / 26, pad=2 * cv.px(22))
         cap, _ = cap_metrics(font, text)
@@ -2111,6 +2116,7 @@ class Job:
     trim: bool = True  # --no-trim: False keeps the capture and panels whole (no bar trimming)
     shade_auto: bool = False  # --shade not given: _compose picks the lightest shade that reads (_auto_shade)
     unshaded: tuple = None  # set by _backdrop: the single image composed once, before any shade (see there)
+    label_caps: bool = True  # set by _assign_roles: the label font's small lines go in caps (catalog "caps")
 
 
 def _check_args(j):
@@ -2407,7 +2413,7 @@ def _assign_roles(j):
     info = j.info
     warnings = info["warnings"]
     lentry = bundled_entry(j.label_font) if j.label_font else None
-    label_caps = lentry["caps"] if lentry else True
+    label_caps = j.label_caps = lentry["caps"] if lentry else True
 
     def small(text):  # the label font's single lines: in caps, unless that font reads poorly in them
         return text.upper() if label_caps else text
@@ -2496,7 +2502,8 @@ def _check_text(j):
     and details are checked with the post text; numbers in the big type once it is laid out (_check_figures)."""
     info, warnings, post = j.info, j.info["warnings"], j.mode == "post"
     small = [("label box", j.box), ("kicker", j.kicker), ("subtitle", j.subtitle)]
-    small += [("panel label %d" % (i + 1), p.upper()) for i, p in enumerate(j.panel_labels or []) if p]
+    small += [("panel label %d" % (i + 1), p.upper() if j.label_caps else p)
+              for i, p in enumerate(j.panel_labels or []) if p]
     small = [(n, t) for n, t in small if t]
     gaps = {}  # character -> the elements that use it
     if small:
@@ -2632,7 +2639,8 @@ def _fit_post(j, avail):
             items, bw, bh, big_size = text_block(j.cv, j.big, j.box, j.kicker, j.subtitle, j.tspec, j.lspec,
                                                  j.tracking_em, j.accent_rgba, j.logo, j.logo_big, j.max_w,
                                                  stack=stack, max_size=cap, big_name=j.big_name,
-                                                 big_color=j.big_rgb + (255,), box_first=True, extra=extra)
+                                                 big_color=j.big_rgb + (255,), box_first=True, extra=extra,
+                                                 ink=j.ink)
             if bh <= avail or (cap <= big_min and n == len(caps) - 1):
                 j.post_fit = {"body_cap": body_cap, "sizes": {"body": bs, "details": ds}, "lines": log,
                               "glued": glued, "long": max(wide)[1:] if wide else long_ if n == start else None}
@@ -3060,7 +3068,8 @@ def _type_layer(j, canvas, warnings):
     label_elements, flagged = [], set()
     if j.layout == "panels":
         canvas, label_elements, flagged = place_panel_labels(layer, canvas, cv, panel_rects(cv, len(j.panels))[0],
-                                                             j.panel_labels, j.lspec, j.band, j.bg, warnings)
+                                                             j.panel_labels, j.lspec, j.band, j.bg, warnings,
+                                                             caps=j.label_caps)
     return canvas, layer, bbox, elements, label_elements, flagged
 
 
@@ -3788,7 +3797,7 @@ def _check_result(j):
     elif scale > 1.5:
         warnings.append(
             "source is %dx%d, upscaled %.1fx even at %dx%d: art will look soft. Recapture at 1440p or "
-            "higher, or upscale with Real-ESRGAN first." % (src.width, src.height, scale, cv.w, cv.h))
+            "higher." % (src.width, src.height, scale, cv.w, cv.h))
 
     info["behind_type"] = round(glyph_contrast(canvas, layer), 2)
     info["contrast"] = round(_worst(built), 2)
@@ -3807,7 +3816,8 @@ def _check_result(j):
                             "even on black; %s." % (name, ratio, MIN_CONTRAST, fix))
         elif light:
             if j.backdrop == "solid":
-                hint = "use a darker --bg"
+                hint = ("the --bg panel is light: use a dark %s" % color_flag(name) if is_light(j.bg)
+                        else "use a darker --bg")
             elif cv.tall:
                 hint = _tall_contrast_fix(j)
             elif narrow:
@@ -3835,7 +3845,12 @@ def _check_result(j):
              else "the edge of the frame")
     for name, b in built["elements"] + built["label_elements"]:
         if name not in built["flagged"] and not inside(b, frame):
-            warnings.append("the %s runs outside %s: shorten it." % (name, where))
+            if j.mode == "post" and name not in ("body", "details"):  # body and details: _post_overflow
+                warnings.append("the %s runs outside %s: %sask the user to approve a shorter version; don't cut "
+                                "the user's words without asking." % (name, where, "use --aspect 4:5, which has "
+                                "the most room for text, or " if j.aspect != "4:5" else ""))
+            else:
+                warnings.append("the %s runs outside %s: shorten it." % (name, where))
     _check_inset(j)
     if built["mask"] is not None:
         glyphs = np.asarray(layer.getchannel("A")) > 128
@@ -4658,7 +4673,7 @@ def main(argv=None):
         print("channel settings: %s" % channel_path)
     saved = load_channel(channel_path) if channel_path else {}
     if post:
-        if args.aspect is None and "aspect" in saved:
+        if args.aspect is None and str(saved.get("aspect", "16:9")).replace(" ", "") != "16:9":
             print("note: post mode renders 4:5 unless --aspect is given; the saved \"aspect\" (%s) in %s is for "
                   "thumbnails" % (saved["aspect"], channel_path))
         if args.lead is None and saved.get("lead", "title") != "title":

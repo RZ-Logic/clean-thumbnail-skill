@@ -102,6 +102,12 @@ class SubtitleBars(unittest.TestCase):
         Image.fromarray(a).save(buf, "JPEG", quality=85)
         buf.seek(0)
         self.assertEqual(thumb.trim_box(Image.open(buf).convert("RGB")), (0, top, 1920, bottom))
+        # two dark, noisy lines between each bar and the picture (ringing, a soft edge) go with the bar
+        a, top, bottom = letterbox()
+        rng = np.random.default_rng(5)
+        for y in (top - 2, bottom):
+            a[y:y + 2] = np.clip(rng.normal(10, 7, (2, 1920, 3)), 0, 255).astype(np.uint8)
+        self.assertEqual(thumb.trim_box(Image.fromarray(a)), (0, top, 1920, bottom))
 
     def test_dark_textured_picture_next_to_the_bar_is_kept(self):
         a, top, bottom = letterbox()
@@ -250,6 +256,10 @@ class ColorManagement(unittest.TestCase):
         self.assertTrue(np.array_equal(np.asarray(thumb.to_rgb(tagged(img, srgb))), a))
         self.assertTrue(np.array_equal(np.asarray(thumb.to_rgb(img)), a))
         self.assertIs(thumb.to_srgb(img, b"not a profile"), img)  # unreadable profile: unchanged
+        # a camera's sRGB profile is rarely bit-identical to littlecms's: one that moves no color by more than
+        # a level is taken as sRGB, so the pixels stay exactly as they are (a full conversion moves some by 1)
+        near = {b"rXYZ": (0.4362, 0.2226, 0.0139), b"gXYZ": (0.3852, 0.7170, 0.0971), b"bXYZ": (0.1432, 0.0607, 0.7141)}
+        self.assertTrue(np.array_equal(np.asarray(thumb.to_rgb(tagged(img, wide_profile(near)))), a))
 
     def test_cutout_and_logo_keep_alpha_and_convert(self):
         icc = wide_profile(P3)
@@ -387,6 +397,30 @@ class OutputChecks(unittest.TestCase):
         with Image.open(b) as im:
             self.assertEqual(im.size, (64, 36))
         self.assertEqual([n for n in os.listdir(self.d) if n.endswith(".tmp")], [])
+        # previews and feed grids too
+        c, e = os.path.join(self.d, "c.png"), os.path.join(self.d, "e.png")
+        with open(c, "wb") as f:
+            f.write(b"original")
+        os.link(c, e)
+        thumb.save_png(Image.new("RGB", (40, 30), (10, 20, 30)), e)
+        self.assertEqual(data(c), b"original")
+        with Image.open(e) as im:
+            self.assertEqual((im.format, im.size), ("PNG", (40, 30)))
+        self.assertEqual([n for n in os.listdir(self.d) if n.endswith(".tmp")], [])
+
+    def test_a_failed_write_leaves_the_old_file_and_no_temp(self):
+        path = os.path.join(self.d, "keep.jpg")
+        with open(path, "wb") as f:
+            f.write(b"previous render")
+
+        class Boom(object):
+            def __len__(self):
+                return 10
+
+        with self.assertRaises(TypeError):
+            thumb.write_file(path, Boom())  # the write fails after the file was opened
+        self.assertEqual(data(path), b"previous render")
+        self.assertEqual([n for n in os.listdir(self.d) if n.endswith(".tmp")], [])
 
     def test_any_image_extension_on_o_is_replaced(self):
         for ext in (".avif", ".tif", ".tiff", ".heic", ".bmp", ".gif", ".JPG", ".png"):
@@ -414,7 +448,7 @@ class PipedOutput(unittest.TestCase):
                 if old_env is not None:
                     os.environ["PYTHONIOENCODING"] = old_env
             self.assertEqual(code, 0)
-            text = raw.getvalue().decode("utf-8")
+            text = raw.getvalue().decode("utf-8", "replace")  # cp1252 bytes would not decode: the check fails
             self.assertIn("cap \u540d\u524d\u2019_thumb.jpg", text)
             self.assertTrue(os.path.exists(os.path.join(d, "cap \u540d\u524d\u2019_thumb.jpg")))
 
@@ -457,6 +491,12 @@ class WidePostFiles(unittest.TestCase):
             with Image.open(files["preview"]) as im:
                 self.assertEqual(im.size, thumb.feed_preview(thumb_img).size)
                 self.assertNotEqual(im.size, thumb.preview_sheet(thumb_img).size)
+                # the card holds the image at its own 16:9 shape: two theme rows of a 500 px card (header 56,
+                # image 281, footer 44) plus a 44 px gap, not a 4:5 card with the image stretched to 625
+                self.assertEqual(im.size[1], 2 * (56 + 500 * 720 // 1280 + 44 + 44))
+            with Image.open(thumb.export(Image.fromarray(picture(1080, 1350)), os.path.join(d, "q"), "4:5",
+                                         "post")["preview"]) as im:
+                self.assertEqual(im.size[1], 2 * (56 + 625 + 44 + 44))  # 4:5 as before
             files = thumb.export(thumb_img, os.path.join(d, "t"), "16:9")
             self.assertTrue(files["phone"][0].endswith("t_phone.jpg"))
         self.assertEqual(thumb.export_paths("s", "16:9", "post")[1], "s_1280.jpg")
@@ -474,3 +514,15 @@ class WidePostFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpscaleAdvice(unittest.TestCase):
+    """skill-docs-14: the upscale warning names a recapture, not a tool the skill never mentions."""
+
+    def test_upscale_warning_names_only_a_recapture(self):
+        rng = np.random.default_rng(9)
+        small = Image.fromarray(rng.integers(0, 255, (358, 358, 3), dtype=np.uint8), "RGB")
+        _, info = thumb.render(small, "SIMON", "No hit")
+        w = [x for x in info["warnings"] if x.startswith("source is 358x358")]
+        self.assertEqual(len(w), 1, info["warnings"])
+        self.assertTrue(w[0].endswith("Recapture at 1440p or higher."), w[0])

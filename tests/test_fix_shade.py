@@ -231,7 +231,7 @@ class PreviewBoxes(unittest.TestCase):
         img = grainy(1280, 720, color=(120, 110, 100))
         box = (0.62, 0.2, 0.74, 0.45)
         out, info = thumb.render(img, "SIMON", "No hit", lead="title", text_side="left", subject_box=box)
-        self.assertEqual(out.info["boxes"], [("subject box", tuple(info["subject_box"]["rect"]))])
+        self.assertEqual(out.info.get("boxes"), [("subject box", tuple(info["subject_box"]["rect"]))])
         plain = thumb.preview_sheet(thumb.render(img, "SIMON", "No hit", lead="title", text_side="left")[0])
         sheet = thumb.preview_sheet(out)
         self.assertEqual(sheet.width, plain.width + 320 + 28)
@@ -246,8 +246,7 @@ class PreviewBoxes(unittest.TestCase):
         room = grainy(1280, 720, color=(60, 55, 50), sigma=5)
         out, info = thumb.render(room, "DLSS 5", "On a CRT", inset=noise(400, 300), inset_box=(0.5, 0.2, 0.9, 0.7),
                                  lead="title", text_side="left")
-        self.assertEqual([n for n, _ in out.info["boxes"]], ["inset box"])
-        self.assertEqual(out.info["boxes"][0][1], tuple(info["inset_rect"]))
+        self.assertEqual(out.info.get("boxes"), [("inset box", tuple(info["inset_rect"]))])
         for aspect, sheet in (("4:5", thumb.feed_preview), ("9:16", thumb.reels_preview)):
             img = grainy(1920, 1080, color=(120, 110, 100))
             with_box = thumb.render(img, "SIMON", "No hit", lead="title", aspect=aspect,

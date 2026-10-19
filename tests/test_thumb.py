@@ -1,4 +1,7 @@
-"""Tests for scripts/thumb.py. Run: python -m unittest discover -s tests"""
+"""Tests for scripts/thumb.py. Run: python -m unittest discover -s tests
+A quick run while iterating skips the slow demo-command and every-format export tests: set CT_FAST=1
+(PowerShell: $env:CT_FAST=1). The default run, and CI, runs everything."""
+import io
 import json
 import os
 import sys
@@ -6,7 +9,7 @@ import tempfile
 import unittest
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, JpegImagePlugin
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "skill", "clean-thumbnail", "scripts"))
@@ -14,6 +17,8 @@ sys.path.insert(0, os.path.join(ROOT, "skill", "clean-thumbnail", "scripts"))
 import thumb  # noqa: E402
 
 RNG = np.random.default_rng(0)
+FAST = os.environ.get("CT_FAST", "").strip() not in ("", "0")
+slow = unittest.skipIf(FAST, "CT_FAST=1 skips the slow demo and export tests")
 
 
 def noise(w, h, lo=0, hi=255):
@@ -92,15 +97,85 @@ class Resolution(unittest.TestCase):
             files = thumb.export(out, os.path.join(d, "t"))
             self.assertEqual(files["master"][1], (3840, 2160))
             self.assertEqual(files["phone"][1], (1280, 720))
-            self.assertLessEqual(files["phone"][3], thumb.PHONE_MAX_BYTES)
+            self.assertLessEqual(files["phone"][3], 2 * 1024 * 1024)
             with Image.open(files["phone"][0]) as im:
                 self.assertEqual(im.size, (1280, 720))
             self.assertTrue(os.path.exists(files["preview"]))
+            # colored type smears under 4:2:0 chroma: master and copy are q88 or more with 4:4:4 (sampling 0)
+            for key in ("master", "phone"):
+                path, _, q, size = files[key]
+                self.assertGreaterEqual(q, 88, key)
+                self.assertEqual(os.path.getsize(path), size, key)
+                with Image.open(path) as im:
+                    self.assertEqual(JpegImagePlugin.get_sampling(im), 0, key)
+                    self.assertEqual(im.format, "JPEG")
+                    # libjpeg's quantization tables scale with the quality: q92's luma table starts at 3
+                    self.assertLessEqual(im.quantization[0][0], 3, key)
 
     def test_phone_copy_stays_under_2mb_on_pure_noise(self):
+        self.assertEqual(thumb.PHONE_MAX_BYTES, 2 * 1024 * 1024)  # YouTube's phone upload limit
         with tempfile.TemporaryDirectory() as d:
-            _, size = thumb.save_jpeg(noise(1280, 720), os.path.join(d, "t.jpg"))
-        self.assertLessEqual(size, thumb.PHONE_MAX_BYTES)
+            q, size = thumb.save_jpeg(noise(1280, 720), os.path.join(d, "t.jpg"))
+            self.assertEqual((q, os.path.getsize(os.path.join(d, "t.jpg"))), (92, size))  # fits at q92
+            # a grainy 1080x1920 copy is about 3.6 MB at q92: the quality steps down until it fits
+            path = os.path.join(d, "tall.jpg")
+            q, size = thumb.save_jpeg(noise(1080, 1920), path)
+            self.assertLess(q, 92)
+            self.assertLessEqual(size, 2 * 1024 * 1024)
+            self.assertEqual(os.path.getsize(path), size)
+            self.assertGreater(thumb.encode_jpeg(noise(1080, 1920), q + 4).tell(), 2 * 1024 * 1024)  # the highest q that fits
+            # a limit between the q92 and q88 sizes: one step down, still 4:4:4
+            img = noise(640, 640)
+            s88, s92 = thumb.encode_jpeg(img, 88).tell(), thumb.encode_jpeg(img, 92).tell()
+            q, size = thumb.save_jpeg(img, path, max_bytes=(s88 + s92) // 2)
+            self.assertEqual((q, size), (88, s88))
+            with Image.open(path) as im:
+                self.assertEqual(JpegImagePlugin.get_sampling(im), 0)
+            # any limit: the step-down stops at the first quality under it, and below q88 the chroma is 4:2:0
+            q, size = thumb.save_jpeg(noise(640, 640), path, max_bytes=300000)
+            self.assertLess(q, 88)
+            self.assertLessEqual(size, 300000)
+            with Image.open(path) as im:
+                self.assertEqual(JpegImagePlugin.get_sampling(im), 2)
+
+
+class ExifOrientation(unittest.TestCase):
+    """Phone photos are stored sideways with an EXIF Orientation tag: every input is turned upright."""
+
+    @staticmethod
+    def sideways(fmt="JPEG", mode="RGB"):
+        """40x20 stored, red left half and blue right half, tagged Orientation 6 (rotate 90 degrees clockwise to
+        show): upright it is 20x40 with red on top and blue at the bottom."""
+        img = Image.new(mode, (40, 20), (0, 0, 0, 0) if mode == "RGBA" else (0, 0, 0))
+        img.paste((220, 30, 30) + ((255,) if mode == "RGBA" else ()), (0, 2, 20, 18))
+        img.paste((30, 30, 220) + ((255,) if mode == "RGBA" else ()), (20, 2, 40, 18))
+        ex = Image.Exif()
+        ex[0x0112] = 6
+        buf = io.BytesIO()
+        img.save(buf, fmt, exif=ex, **({"quality": 95} if fmt == "JPEG" else {}))
+        buf.seek(0)
+        return Image.open(buf)
+
+    def assert_upright(self, img):
+        self.assertEqual(img.size, (20, 40))
+        top, bottom = img.convert("RGB").getpixel((10, 8)), img.convert("RGB").getpixel((10, 32))
+        self.assertGreater(top[0], top[2] + 100)  # red on top
+        self.assertGreater(bottom[2], bottom[0] + 100)  # blue at the bottom
+
+    def test_capture_subject_and_logo_are_turned_upright(self):
+        self.assert_upright(thumb.to_rgb(self.sideways()))
+        self.assert_upright(thumb.cut_out(self.sideways("PNG", "RGBA")))
+        logo = thumb._prepare_logo(self.sideways("PNG", "RGBA"), False)
+        self.assertGreater(logo.height, logo.width)  # trimmed to its opaque part, still upright
+
+    def test_render_sees_the_upright_photo(self):
+        ex = Image.Exif()
+        ex[0x0112] = 6
+        buf = io.BytesIO()
+        noise(1920, 1080).save(buf, "JPEG", exif=ex, quality=90)
+        buf.seek(0)
+        _, info = thumb.render(Image.open(buf), "SIMON", aspect="9:16", size="720p")
+        self.assertEqual(tuple(info["source"]), (1080, 1920))
 
 
 class Layout(unittest.TestCase):
@@ -148,10 +223,10 @@ class Lead(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src = os.path.join(d, "cap.png")
             half_busy(1280, 720).save(src)
-            thumb.main([src, "--title", "SIMON", "--label", "Parry only", "-o", os.path.join(d, "t")])
+            self.assertEqual(run_cli([src, "--title", "SIMON", "--label", "Parry only", "-o", os.path.join(d, "t")])[0], 0)
             for f in ("t_A.jpg", "t_A_phone.jpg", "t_A_preview.png", "t_B.jpg", "t_B_phone.jpg"):
                 self.assertTrue(os.path.exists(os.path.join(d, f)), f)
-            thumb.main([src, "--title", "SIMON", "-o", os.path.join(d, "solo")])
+            self.assertEqual(run_cli([src, "--title", "SIMON", "-o", os.path.join(d, "solo")])[0], 0)
             self.assertTrue(os.path.exists(os.path.join(d, "solo.jpg")))
             self.assertFalse(os.path.exists(os.path.join(d, "solo_B.jpg")))
 
@@ -280,19 +355,22 @@ class Vertical(unittest.TestCase):
         self.assertLess(abs((y0 + y1) / 2 - out.height / 2), out.height * 0.05)  # type on the seam
         self.assertFalse(any("safe zone" in w for w in info["warnings"]))
 
+    @slow
     def test_export_and_cli_for_all_aspects(self):
         with tempfile.TemporaryDirectory() as d:
             src = os.path.join(d, "cap.png")
             half_busy(3840, 2160).save(src)
-            thumb.main([src, "--title", "SIMON", "--label", "Parry only", "--aspect", "all", "-o", os.path.join(d, "t")])
+            code, text = run_cli([src, "--title", "SIMON", "--label", "Parry only", "--aspect", "all", "-o",
+                                  os.path.join(d, "t")])
+            self.assertEqual(code, 0, text)
             for f in ("t_A.jpg", "t_A_phone.jpg", "t_B_4x5.jpg", "t_B_4x5_1080.jpg", "t_A_4x5_preview.png",
                       "t_A_9x16.jpg", "t_A_9x16_preview.png"):
                 self.assertTrue(os.path.exists(os.path.join(d, f)), f)
             self.assertFalse(os.path.exists(os.path.join(d, "t_A_9x16_1080.jpg")))  # master already 1080 wide
             with Image.open(os.path.join(d, "t_B_4x5_1080.jpg")) as im:
                 self.assertEqual(im.size, (1080, 1350))
-            with self.assertRaises(SystemExit):
-                thumb.main([src, "--title", "X", "--aspect", "1:1", "-o", os.path.join(d, "bad")])
+            code, text = run_cli([src, "--title", "X", "--aspect", "1:1", "-o", os.path.join(d, "bad")])
+            self.assertEqual(code, 2, text)
 
 
 class Contrast(unittest.TestCase):
@@ -383,7 +461,8 @@ class Channel(unittest.TestCase):
                 out = _io.StringIO()
                 with contextlib.redirect_stdout(out):
                     thumb.main(["cap.png", "--title", "SIMON", "-o", "saved"])
-                thumb.main(["cap.png", "--title", "SIMON", "--aspect", "16:9", "-o", "once"])
+                with contextlib.redirect_stdout(_io.StringIO()):
+                    thumb.main(["cap.png", "--title", "SIMON", "--aspect", "16:9", "-o", "once"])
             finally:
                 os.chdir(cwd)
             self.assertTrue(os.path.exists(os.path.join(d, "saved_4x5.jpg")))
@@ -429,18 +508,27 @@ class Channel(unittest.TestCase):
             half_busy(1920, 1080).save(src)
             with open(os.path.join(d, thumb.CHANNEL_FILE), "w") as f:
                 json.dump({"lead": "title", "size": "720p"}, f)
-            cwd = os.getcwd()
-            os.chdir(d)
-            try:
-                thumb.main(["cap.png", "--title", "SIMON", "--label", "Parry only", "-o", "t"])
-            finally:
-                os.chdir(cwd)
+            code, text = run_cli(["cap.png", "--title", "SIMON", "--label", "Parry only", "-o", "t"], cwd=d)
+            self.assertEqual(code, 0, text)
             self.assertTrue(os.path.exists(os.path.join(d, "t.jpg")))  # lead title from the file: one variant
             with Image.open(os.path.join(d, "t.jpg")) as im:
                 self.assertEqual(im.size, (1280, 720))  # size from the file
 
 
 # ---------------------------------------------------------------- regression tests from the v0.3 review
+
+def built_zip_names():
+    """Names in a zip built by tools/build_zip.py into a temporary folder (never the checkout's dist/)."""
+    import importlib.util
+    import zipfile
+    spec = importlib.util.spec_from_file_location("build_zip", os.path.join(ROOT, "tools", "build_zip.py"))
+    build_zip = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build_zip)
+    with tempfile.TemporaryDirectory() as d:
+        path, _ = build_zip.build(os.path.join(d, "clean-thumbnail.zip"))
+        with zipfile.ZipFile(path) as z:
+            return z.namelist()
+
 
 def run_cli(args, cwd=None):
     """Run thumb.main quietly; returns (exit code or 0, stdout text)."""
@@ -1022,11 +1110,7 @@ class Fonts(unittest.TestCase):
             self.assertIn("title type: bundled font bebas", text)
 
     def test_zip_ships_fonts_and_licenses(self):
-        import subprocess
-        import zipfile
-        subprocess.run([sys.executable, os.path.join(ROOT, "tools", "build_zip.py")], check=True,
-                       capture_output=True)
-        names = zipfile.ZipFile(os.path.join(ROOT, "dist", "clean-thumbnail.zip")).namelist()
+        names = built_zip_names()
         for name, e in thumb.font_catalog().items():
             self.assertIn("clean-thumbnail/fonts/" + e["file"], names)
             self.assertIn("clean-thumbnail/fonts/%s/OFL.txt" % os.path.dirname(e["file"]), names)
@@ -1217,13 +1301,10 @@ class FontsReview(unittest.TestCase):
         self.assertIn("official logo; hook in bundled font cinzel", info["title_source"])
 
     def test_catalog_names_families_and_zip_carries_mit(self):
-        import subprocess
-        import zipfile
         cat = thumb.font_catalog()
         self.assertEqual(len(cat), 16)
         self.assertTrue(all(e.get("family") for e in cat.values()))
-        subprocess.run([sys.executable, os.path.join(ROOT, "tools", "build_zip.py")], check=True, capture_output=True)
-        names = zipfile.ZipFile(os.path.join(ROOT, "dist", "clean-thumbnail.zip")).namelist()
+        names = built_zip_names()
         self.assertIn("clean-thumbnail/LICENSE", names)
 
 
@@ -1336,6 +1417,9 @@ class Crop(unittest.TestCase):
         stage[400:480, 600:1400] = (240, 40, 40)  # outstretched arms reach into the dark margin
         _, _, box = thumb.prepare_background(Image.fromarray(stage), (400 / 1920, 150 / 1080, 1600 / 1920, 980 / 1080))
         self.assertEqual(box, (400, 150, 1600, 980))  # kept as asked, arms included
+        # the same stage cut so the lit part is 4:3: a standard shape is no reason to trim inside a crop
+        _, _, box = thumb.prepare_background(Image.fromarray(stage), (400 / 1920, 250 / 1080, 1600 / 1920, 850 / 1080))
+        self.assertEqual(box, (400, 250, 1600, 850))
 
     def test_inset_box_keeps_its_place_inside_a_crop(self):
         _, m, _ = thumb.prepare_background(noise(1000, 500), (0.2, 0, 0.7, 1), (0.3, 0.2, 0.5, 0.4))
@@ -1366,6 +1450,7 @@ class Crop(unittest.TestCase):
         _, info = thumb.render(grainy(color=(110, 110, 110)), "", "OP", logo=logo, title_color="auto", lead="title")
         self.assertFalse(any("big type stays white" in n for n in info["notes"]))  # the logo is the big element
 
+    @slow
     def test_dawnwalker_demo_command_runs(self):
         art, logo = os.path.join(ROOT, "demo", "dawnwalker-art.jpg"), os.path.join(ROOT, "demo", "dawnwalker-logo.png")
         if not (os.path.exists(art) and os.path.exists(logo)):
@@ -1408,6 +1493,7 @@ class Crop(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("from 0 to 0.5", text)
 
+    @slow
     def test_creator_demo_command_runs(self):
         photo = os.path.join(ROOT, "demo", "creator-photo.jpg")
         if not os.path.exists(photo):
@@ -1428,6 +1514,7 @@ class Crop(unittest.TestCase):
                     self.assertEqual(im.size, (1280, 720))
                 self.assertLess(os.path.getsize(phone), 2 * 1024 * 1024)
 
+    @slow
     def test_subject_demo_command_runs(self):
         room, person = (os.path.join(ROOT, "demo", n) for n in ("subject-room.jpg", "subject-person.png"))
         if not (os.path.exists(room) and os.path.exists(person)):
@@ -1462,6 +1549,7 @@ class Crop(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "post_4x5.jpg")))
             self.assertFalse(os.path.exists(os.path.join(d, "post_A.jpg")))  # one image, not an A/B pair
 
+    @slow
     def test_ds2_vertical_demo_command_runs(self):
         cap = os.path.join(ROOT, "demo", "ds2-capture.jpg")
         if not os.path.exists(cap):
@@ -1618,6 +1706,7 @@ class SubjectBox(unittest.TestCase):
         self.assertGreater(info["subject_box"]["visibility"], 0.9)
         self.assertFalse(warned(info, "--subject-box"), info["warnings"])
 
+    @slow
     def test_creator_demo_with_subject_box_in_every_format(self):
         import re
         photo = os.path.join(ROOT, "demo", "creator-photo.jpg")
@@ -1765,6 +1854,7 @@ class SubjectBoxAdvice(unittest.TestCase):
         self.assertEqual(info["text_side"], "top")
         self.assertTrue(any("of its middle in view" in n for n in info["notes"]), info["notes"])
 
+    @slow
     def test_dawnwalker_flips_and_ds2_stays(self):
         art, logo, ds2 = (os.path.join(ROOT, "demo", n) for n in ("dawnwalker-art.jpg", "dawnwalker-logo.png",
                                                                    "ds2-capture.jpg"))
@@ -2024,6 +2114,7 @@ class ReviewArgon(unittest.TestCase):
         self.assertEqual("%.1f" % thumb.shown_ratio(4.5), "4.5")
         self.assertEqual("%.1f" % thumb.shown_ratio(14.53), "14.5")
 
+    @slow
     def test_rembg_runs_once_per_subject_across_variants_and_formats(self):
         import types
         calls = []
@@ -2179,10 +2270,12 @@ class PostMode(unittest.TestCase):
         self.assertLessEqual(widest, int(cv.w * thumb.POST_COL_SHARE))
 
     def test_contrast_and_frame_checks_cover_body_and_details(self):
-        _, info = thumb.render(Image.new("RGB", (1920, 1080), (235, 235, 230)), "REVIEWS", mode="post",
-                               body=POST_BODY, details=POST_DETAILS, bg="#e8e8e8")
-        self.assertTrue(any(w.startswith("the body has") for w in info["warnings"]))
+        light = Image.new("RGB", (1920, 1080), (235, 235, 230))
+        _, info = thumb.render(light, "REVIEWS", mode="post", body=POST_BODY, details=POST_DETAILS, bg="#787878")
+        self.assertTrue(any(w.startswith("the body has") for w in info["warnings"]))  # mid-gray: no ink reaches 4.5:1
         self.assertTrue(any(w.startswith("the details has") for w in info["warnings"]))
+        _, info = thumb.render(light, "REVIEWS", mode="post", body=POST_BODY, details=POST_DETAILS, bg="#e8e8e8")
+        self.assertFalse(any(w.startswith(("the body has", "the details has")) for w in info["warnings"]))
         _, info = thumb.render(dark_scene(), "REVIEWS", mode="post", body="x" * 400)
         self.assertTrue(warned(info, "the body runs outside the edge of the frame"))
         self.assertEqual(info["post_text"]["body"]["lines"], ["x" * 400])  # never broken or cut
@@ -2209,13 +2302,13 @@ class PostMode(unittest.TestCase):
             self.assertNotIn("no saved formats", text)
             # the channel file's thumbnail formats and A/B lead don't apply to a post, and the run says so
             with open(os.path.join(d, thumb.CHANNEL_FILE), "w") as f:
-                json.dump({"aspect": "16:9", "lead": "ab", "mode": "post"}, f)
+                json.dump({"aspect": "16:9,4:5", "lead": "ab", "mode": "post"}, f)
             code, text = run_cli(["cap.png", "--title", "RESUME REVIEWS", "--label", "Free", "--body", POST_BODY,
                                   "-o", "c"], cwd=d)
             self.assertEqual(code, 0, text)
             self.assertTrue(os.path.exists(os.path.join(d, "c_4x5.jpg")))
             self.assertFalse(any(f.startswith("c_A") or f == "c.jpg" for f in os.listdir(d)))
-            self.assertIn('the saved "aspect" (16:9)', text)
+            self.assertIn('the saved "aspect" (16:9,4:5)', text)
             self.assertIn("is for thumbnails", text)
             # flags on the command line still win
             code, text = run_cli(args + ["--aspect", "16:9", "--lead", "ab", "-o", "w"], cwd=d)

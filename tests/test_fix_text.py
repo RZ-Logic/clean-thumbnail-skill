@@ -72,10 +72,16 @@ class LineBreaks(unittest.TestCase):
             thumb.render(half_busy(), "SAM", "No hit\\nParry only", lead="title")
         self.assertIn("NO HIT PARRY ONLY", d.texts)
         with Drawn() as d:
-            thumb.render(half_busy(), "SAM", "No hit\\nParry only", lead="label")
+            _, typed = thumb.render(half_busy(), "SAM", "No hit\\nParry only", lead="label")
         self.assertIn("NO HIT", d.texts)
         self.assertIn("PARRY ONLY", d.texts)
         self.assertFalse([t for t in d.texts if "\\" in t])
+        # stacked like a hook split at " · ": each line fitted on its own, so the short first one is set larger
+        _, dot = thumb.render(half_busy(), "SAM", "No hit · Parry only", lead="label")
+        hook = [b for n, b in typed["elements"] if n == "hook"]
+        self.assertEqual(len(hook), 2)
+        self.assertEqual(hook, [b for n, b in dot["elements"] if n == "hook"])
+        self.assertGreater(hook[0][3] - hook[0][1], hook[1][3] - hook[1][1])
 
     def test_kicker_subtitle_and_panel_labels_join_their_lines(self):
         with Drawn() as d:
@@ -83,6 +89,11 @@ class LineBreaks(unittest.TestCase):
         self.assertIn("ACT ONE", d.texts)
         self.assertIn("THE END", d.texts)
         self.assertEqual(thumb.one_line("A\\nB\n C "), "A B C")
+        with Drawn() as d:
+            thumb.render(None, "SAM", "", panels=[flat(), flat(color=(60, 60, 60))],
+                         panel_labels=["Ray\\ntracing", "Raster"])
+        self.assertIn("RAY TRACING", d.texts)
+        self.assertFalse([t for t in d.texts if "\\" in t or "\n" in t])
 
 
 class LogoNote(unittest.TestCase):
@@ -126,6 +137,8 @@ class TrackedShaping(unittest.TestCase):
         whole = ink(lambda d: thumb.draw_text(d, 40, 200, "e\u0301", f, 0, 255))
         cols = lambda m: np.flatnonzero(m.any(axis=0))  # noqa: E731
         self.assertLessEqual(cols(nfd)[-1], cols(whole)[-1] + 1)  # the accent sits over the e, not after it
+        self.assertTrue((nfd == whole).all())  # one cluster: drawn exactly as the whole, accent included
+        self.assertGreater(int(nfd.sum()), int(ink(lambda d: thumb.draw_text(d, 40, 200, "e", f, 0, 255)).sum()))
 
     def test_scripts_that_need_shaping_are_detected(self):
         self.assertTrue(thumb.needs_shaping("שלום"))
@@ -222,7 +235,7 @@ class LightBackground(unittest.TestCase):
         self.assertEqual(thumb.ink_for((242, 239, 232)), thumb.INK_DARK)
         self.assertEqual(thumb.ink_for((20, 20, 20)), thumb.WHITE)
 
-    def test_post_text_follows_a_dark_title(self):
+    def test_post_text_reads_on_a_light_panel(self):
         _, info = thumb.render(half_busy(1280, 1600), "MAKE YOUR FIRST VIDEO", mode="post",
                                body="Learn to frame a shot and record clear sound.", details="Saturday · Studio 04",
                                title_color="#1a1a1a", backdrop="solid", bg="#f3efe6")
@@ -258,6 +271,19 @@ class Figures(unittest.TestCase):
         _, info = thumb.render(half_busy(), "1899", "", title_font="playfair")
         self.assertFalse(warned(info, "oldstyle"))
 
+    def test_without_raqm_lining_figures_need_fribidi(self):
+        # Playfair's lining figures are an OpenType feature only raqm layout turns on: without it, every
+        # setting is oldstyle, and the fix is the library, not another font
+        saved = thumb.LAYOUT_FEATURES
+        thumb.LAYOUT_FEATURES = None
+        try:
+            _, info = thumb.render(half_busy(), "1899", "", title_font="playfair")
+        finally:
+            thumb.LAYOUT_FEATURES = saved
+        self.assertTrue(warned(info, "sets numbers as oldstyle figures"))
+        self.assertTrue(warned(info, "install the FriBiDi library"))
+        self.assertFalse(warned(info, "only beside letters"))
+
     def test_tracked_slab_with_letters_names_tracking(self):
         if not thumb.LAYOUT_FEATURES:
             self.skipTest("Pillow without raqm: slab is oldstyle everywhere")
@@ -265,6 +291,23 @@ class Figures(unittest.TestCase):
         self.assertTrue(warned(info, "--title-tracking 0"))
         _, info = thumb.render(half_busy(), "RDR 2", "", title_font="slab", title_tracking=0)
         self.assertFalse(warned(info, "oldstyle"))
+
+
+class InkCrossover(unittest.TestCase):
+    """ink_for picks the ink with the higher contrast: near-black (18, 18, 18) is not black, so just above
+    LIGHT_LUMINANCE white still reads better."""
+
+    def test_ink_is_the_higher_contrast_one(self):
+        def ratio(a, b):
+            la, lb = (float(thumb.wcag_luminance(np.array(c, dtype=np.float32) / 255.0)) for c in (a, b))
+            return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+        for v in range(100, 140):
+            bg = (v, v, v)
+            other = thumb.WHITE if thumb.ink_for(bg) == thumb.INK_DARK else thumb.INK_DARK
+            self.assertGreaterEqual(ratio(thumb.ink_for(bg), bg), ratio(other, bg), bg)
+        self.assertEqual(thumb.ink_for((119, 119, 119)), thumb.WHITE)  # luminance 0.184: white 4.5:1, ink 4.2:1
+        self.assertEqual(thumb.ink_for((242, 239, 232)), thumb.INK_DARK)
+        self.assertEqual(thumb.ink_for(None), thumb.WHITE)
 
 
 class LabelCase(unittest.TestCase):
@@ -279,6 +322,17 @@ class LabelCase(unittest.TestCase):
         with Drawn() as d:
             thumb.render(half_busy(), "Dracula", "Castle Night", kicker="Chapter one", lead="title")
         self.assertIn("CASTLE NIGHT", d.texts)
+
+    def test_panel_labels_follow_the_label_font_case(self):
+        panels = [half_busy(), half_busy()]
+        with Drawn() as d:
+            _, info = thumb.render(None, "Dracula", panels=panels, panel_labels=["Nr off", "Nr on"],
+                                   title_font="gothic", label_font="gothic")
+        self.assertIn("Nr off", d.texts)
+        self.assertNotIn("NR OFF", d.texts)
+        with Drawn() as d:
+            thumb.render(None, "Dracula", panels=panels, panel_labels=["Nr off", "Nr on"])
+        self.assertIn("NR OFF", d.texts)
 
 
 class SmallType(unittest.TestCase):
