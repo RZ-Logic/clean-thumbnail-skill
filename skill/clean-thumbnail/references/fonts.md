@@ -98,7 +98,12 @@ set in a bold weight reads as a different brand.
   --title-tracking 0.12`. The catalog default (`outfit`, SemiBold, 0.02 em) is the right family
   but the wrong weight and spacing.
 - **Limits:** stay at Light or heavier (ExtraLight and Thin strokes risk fading at 168 px), and
-  wider spacing makes long titles smaller. Check the preview.
+  wider spacing makes long titles smaller. The script measures the strokes on the smallest tile the
+  type is shown at (168 px on 16:9, the phone feed width on 4:5 and 9:16) and warns under 1.2 px,
+  naming the lightest heavier weight that passes. The wide, spaced Light recipe
+  suits one or two short words on 16:9 (a long title such as DEATH STRANDING 2 at 16:9 warns that the
+  big type is small) and works on 4:5 and 9:16, as in the README demo; otherwise use `outfit@Regular`
+  or `outfit@SemiBold`. Check the preview.
 
 ## Readability at small sizes
 
@@ -108,9 +113,20 @@ set in a bold weight reads as a different brand.
   script splits two-word titles when that makes the type clearly bigger, and warns when the type
   ends up small anyway.
 - Numbers: the script asks every font for lining figures, so playfair and gothic numbers ("2049",
-  "142 FPS") sit on the baseline at full height (needs Pillow with raqm, which the standard
-  Windows, macOS and Linux wheels include).
-- The script warns when the font has no glyph for a character (accents, other scripts, emoji).
+  "142 FPS") sit on the baseline at full height. This needs Pillow with raqm (the FriBiDi library;
+  the standard Linux wheels include it, some Windows and macOS builds do not). Some fonts (slab)
+  only give lining figures beside letters and untracked: the script warns and names the fix
+  (`--title-tracking 0`, or oswald or outfit). Without raqm, playfair and slab print oldstyle
+  figures and the script says so.
+- Tracked type is measured without ligatures, so "fi" and "ff" no longer collide, and accents stay
+  with their letter. Right-to-left and joining scripts (Hebrew, Arabic, Indic, Thai) are drawn as
+  whole shaped lines without tracking, with a note; without raqm the script warns that they would
+  draw unjoined.
+- The script warns when the font has no glyph for a character (accents, other scripts, emoji, and
+  the middle dot of a hook such as "No hit · Parry only"), for the big type and for the label box,
+  kicker, subtitle and panel labels. It names the font and the elements.
+- Label fonts marked as not capitals-only (gothic, brush) keep the case you write for the label box,
+  kicker and subtitle; the others set them in capitals.
 
 ## Limits
 

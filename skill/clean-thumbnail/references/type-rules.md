@@ -1,7 +1,8 @@
 # Type rules: from video title to thumbnail text
 
-The thumbnail and the title are read together, so the thumbnail never repeats the title. It works
-for any video because it asks one question, not "what kind of video is this".
+The thumbnail and the title are read together, so the thumbnail never restates the whole title: it
+lifts the subject and the hook from it and leaves the rest to the title. It works for any video
+because it asks one question, not "what kind of video is this".
 
 These rules are for thumbnails. A standalone post (a Facebook or Instagram image whose text is the
 message) follows [Posts](#posts) instead: there is no video title to carry the rest.
@@ -13,6 +14,8 @@ especially what the image can't show.** The label is the context that makes the 
 sense. Everything else stays in the video title.
 
 Ask: if ten videos about this subject sat in a row, which words would make a viewer pick this one?
+If the title names only a topic ("The Ronaldo Situation"), ask the user what happened or changed
+before filling the label.
 
 ## Slots
 
@@ -28,15 +31,19 @@ Keep the total at 8 words or fewer. At "up next" size (168 px) only the big type
 
 ## Lead: which slot is big
 
-`--lead ab` (the default) renders both, as the pair for YouTube's Test & Compare:
+`--lead ab` (the default) renders both, as the pair for YouTube's Test & Compare (16:9 long-form
+only; see below for other formats):
 
 - **A, title leads:** the subject is big, the hook sits in the box. Best when the subject is the
   draw: a famous boss, a new product, a person people search for.
 - **B, label leads:** the hook is big, the subject sits in the box. Best when many videos share the
   subject and the hook is the difference: a challenge run, a twist, a result. Write multi-part
-  hooks with " · " ("No hit · Parry only"): each part gets its own line, the first one largest.
+  hooks with " · " ("No hit · Parry only"): each part gets its own line, and each line is fitted to the
+  column on its own, so the shorter part comes out larger; put the key word in the shorter part.
 
-Don't guess which wins. Ship both and let the test decide.
+Don't guess which wins. For a 16:9 long-form video, ship both and let the test decide. Test & Compare
+does not run on Shorts, Premieres, scheduled lives, made-for-kids or private videos, so for 9:16 and
+4:5 ship one variant (`--lead title` or `--lead label`) or let the user choose by eye.
 
 ## Examples across topics
 
@@ -45,7 +52,7 @@ Don't guess which wins. Ship both and let the test decide.
 | Clair Obscur Expedition 33 GOTY - Simon Fight (No hit - Only Parry) \| Expert | SIMON | No hit · Parry only | one frame |
 | DLSS 5 on a CRT Monitor Looks UNREAL | DLSS 5 | On a CRT | monitor photo + game frame as inset |
 | Windows 11 26H2 vs Windows 11 25H2 - Gaming | GAMING | Which is faster | two panels, labels 25H2 and 26H2 |
-| The Ronaldo Situation | RONALDO | The situation | one photo, or a background plus a cut-out |
+| Why Ronaldo Was Benched in the Final | RONALDO | Benched in the final | one photo, or a background plus a cut-out |
 | 4 Months of Silence Can Change Your Life | 4 MONTHS | Of silence | background plus a cut-out of the creator |
 | Elden Ring Official Story Trailer | game logo (`--logo`) | Story trailer | one frame |
 | RTX 5060 Review: 142 FPS at 1440p? | 142 FPS | RTX 5060 · 1440p | one frame or product shot |
@@ -84,8 +91,7 @@ A post has no video title, so the image text is the message. Keep the user's wor
 | Slot | Flag | What goes in it |
 |---|---|---|
 | Headline | `--title` | The one thing a scroller should take away, in the user's own words: their headline if they wrote one, else the key phrase of their first sentence |
-| Body | `--body` | The rest of the message, verbatim and in order; `
-` for a line break the user made |
+| Body | `--body` | The rest of the message, verbatim and in order; `\n` for a line break, `\n\n` for a new paragraph |
 | Details | `--details` | When, where, price, how to act or reply; parts joined with " · " |
 | Label | `--label` | Optional: a short tag the user gave ("Free", "This weekend") |
 
@@ -93,6 +99,9 @@ A post has no video title, so the image text is the message. Keep the user's wor
   hype words, emoji or claims the user didn't make; keep their numbers, dates and names exactly.
 - **No word cap.** The script checks that the body reads at feed size instead. If it warns, show
   the user the shortest cut that fixes it (or a taller format, 4:5 or 9:16) and wait for a yes.
+- **Links and long words** wrap by breaking after `/ - _ ? & =` (no hyphen added). If one still
+  doesn't fit, ask the user to approve a shorter form (a short link); don't cut it yourself.
+- **A brand logo** (`--logo`) replaces the headline, so put the headline's words in `--body`.
 - **Hierarchy over size.** The headline is big, the body comfortable, the details small; if
   everything is important, the headline is still one idea.
 - The quiet look stays: one font family per role, white type, one accent color at most.

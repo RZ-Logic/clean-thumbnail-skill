@@ -1,6 +1,6 @@
 interface:
   display_name: "Clean Thumbnail"
-  short_description: "Quiet, editorial YouTube thumbnails from real images, A/B pair up to 4K"
+  short_description: "Quiet editorial thumbnails and posts from real images"
   default_prompt: "Use $clean-thumbnail to make thumbnails from these images for my video titled ..."
 policy:
   allow_implicit_invocation: true

@@ -5,7 +5,7 @@ license: MIT for the code; the bundled fonts are SIL OFL 1.1 (fonts/*/OFL.txt)
 compatibility: Python 3.8+ with numpy and Pillow. Uses its 16 bundled OFL fonts by default (Playfair Display and Outfit for the default title and label), so the same command gives the same type on every OS; --system-fonts opts into installed faces (Bodoni MT, Bahnschrift, Didot), and any font file can be passed in. Optional rembg for removing backgrounds from subject photos.
 metadata:
   author: Rizwan Ahmed
-  version: "0.9.0"
+  version: "0.9.1"
 ---
 
 # Clean thumbnail
@@ -28,11 +28,9 @@ Decide each image's role from what the user says and shows. There are only four:
 | Inset | `--inset img --inset-box x0,y0,x1,y1` | An image shown inside the background: a game on a monitor, a clip on a phone |
 
 Panels replace the background; subject and inset sit on top of one. Subjects go on the side away
-from the type and are matched to the photo behind them (color cast, tone, sharpness, grain), and
-the background is softened behind them (`--push`, default 0.5). Subject files need a transparent
-background; if they don't have one, the script uses rembg when installed, else asks for a cut-out.
-The inset box is in fractions of the background image: look at the background and estimate where
-the screen or frame is.
+from the type and are matched to the photo behind them; they need a transparent background (the
+script uses rembg when installed, else ask for a cut-out). Estimate the inset box, in fractions of
+the background, by looking at it.
 
 ## Thumbnail or post?
 
@@ -45,160 +43,123 @@ Decide this first; it changes what happens to the user's words.
   message as `--title`, the rest as `--body`, when, where, price and how to act as `--details`
   ([type rules: Posts](references/type-rules.md#posts)). Fix spelling and capitals only. Never cut
   the message or move it into the post's caption unless the user asks; if the script says the text
-  won't read at feed size, show the user the cut you would make and wait for a yes.
-  Posts often read best with `--backdrop solid` when the photo is busy or the message is long;
-  thumbnails usually keep the default `fade`.
+  won't read at feed size, show the user the cut you would make and wait for a yes. Posts often read
+  best with `--backdrop solid` when the photo is busy or the message is long; thumbnails usually
+  keep the default `fade`.
 - **Unsure?** Ask once: "Is this a video thumbnail or a post image?"
 
 ## Workflow
 
-1. **Get the images.** The best background is a raw capture: photo mode, HUD off, 1440p or 4K,
-   subject on one side with room for type on the other. Official press-kit art works; key art often
-   has the subject in the middle, which `--subject-box` and `--crop` handle (step 5). Fan art needs
-   the artist's permission and credit; say so if an image looks like fan art. Don't generate or
-   repaint scenes with an image model.
+1. **Get the images.** The best background is a raw capture: photo mode, HUD off (and any RTSS or
+   Afterburner stats overlay off), 1440p or 4K, subject on one side with room for type on the other.
+   **HDR:** the NVIDIA app and Xbox Game Bar save HDR captures as JPEG XR (`.jxr`, sometimes named
+   `.jpg`), which the script cannot read and you cannot view; ask for SDR PNG or JPEG exports, or
+   captures taken with HDR off. Official press-kit art works; key art often has the subject in the
+   middle, which `--subject-box` and `--crop` handle (step 5). Fan art needs the artist's permission
+   and credit. Don't generate or repaint scenes with an image model.
 2. **Write the text** with [references/type-rules.md](references/type-rules.md). Thumbnail: the big
-   type is what makes this video different, the label is context. No kicker unless it is needed.
-   Show the user the text and what you dropped from the title. Post: arrange the user's message into
-   headline, body and details without dropping words, and show them how you split it.
-3. **Pick the title look** with [references/fonts.md](references/fonts.md), in this order:
-   the official logo if the user has one (`--logo`, press kits and official sites publish them);
-   otherwise the bundled
-   font closest to the game's, film's or brand's own lettering (`--title-font cinzel`, see
-   `--list-fonts`); if nothing bundled fits, don't force it: use the channel's saved `title_font`,
-   else the serif or sans default, and say that nothing matched.
-   The label box always keeps the channel font. Tell the user which look you used and why, and
-   that a matched font is close in spirit, not the real lettering. Match the logo's weight and
-   spacing as well as its shape: a thin, widely spaced logo gets a light weight and wide tracking
-   (`--title-font outfit@Light --title-tracking 0.12` for Death Stranding), not the catalog's
-   bold default. Split long single words over two
-   lines (`DAWN\nWALKER`) when the font is wide; the script warns when the type comes out small.
+   type is what makes this video different, the label is context; no kicker unless it is needed.
+   If the title names only a topic, ask the user what happened or changed before you write the
+   label. Show the user the text and what you dropped from the title. Post: arrange the user's
+   message into headline, body and details without dropping words, and show them how you split it.
+3. **Pick the title look** with [references/fonts.md](references/fonts.md), in this order: the
+   official logo if the user has one (`--logo`; press kits and official sites publish them);
+   otherwise the bundled font closest to the game's, film's or brand's own lettering
+   (`--title-font cinzel`, see `--list-fonts`); if nothing bundled fits, use the channel's saved
+   `title_font`, else the serif or sans default, and say that nothing matched. The label box always
+   keeps the channel font. Tell the user which look you used and why; a matched font is
+   close in spirit, not the real lettering. Match weight and spacing as well as shape: a thin,
+   widely spaced logo gets `--title-font outfit@Light --title-tracking 0.12`. Split long single words over two lines
+   (`DAWN\nWALKER`) when the font is wide. With `--logo`, a `--title` is not drawn.
    **Color:** white by default. When the image has one strong signature color (a sunset, neon, an
-   eclipse, a team color), use `--title-color auto`: the script takes that color from the image and
-   lightens it just enough to read on the dark side (it stays white if the image has no vivid
-   color). Or give a brand color (`--title-color "#f2b84b"`). Color the big type *or* the label box
-   (`--accent`), never both in different colors; the script warns if you do. Save a channel color
-   as `title_color` or `accent` in `clean-thumbnail.json`.
-4. **Check for channel settings and formats.** If `clean-thumbnail.json` is in the working folder,
-   the script loads it (style, fonts, colors, lead, size, aspect and so on; flags override it).
+   eclipse, a team color), use `--title-color auto`: the script takes it from the image and lightens
+   it just enough to read (white if the image has no vivid color). Or give a brand color
+   (`--title-color "#f2b84b"`). Color the big type *or* the label box (`--accent`), never both in
+   different colors.
+4. **Thumbnails: check channel settings and formats.** The script loads `clean-thumbnail.json` from
+   the **working folder** only; if the file lives elsewhere, pass `--channel PATH` on every run.
+   Flags override it. Keys: [references/flags.md](references/flags.md#channel-file).
    - **Formats, asked once.** If there is no saved `aspect` and the request doesn't name a platform,
      ask once which platforms the user posts to: YouTube (`16:9`), Facebook or Instagram feed
-     (`4:5`), Reels, Shorts or Stories (`9:16`). Save the answer as `"aspect"` in
-     `clean-thumbnail.json` (create it from
-     [references/channel.example.json](references/channel.example.json) if missing, e.g.
-     `"aspect": "16:9,4:5"`), say where you saved it, and don't ask again.
-   - **After that,** use the saved formats without asking. If a request names a platform ("for
-     Reels", "a Facebook one too"), pass `--aspect` for that request only; change the saved value
-     only when the user says so ("from now on", "always").
+     (`4:5`), Reels, Shorts or Stories (`9:16`). Save only the answer, as
+     `{"aspect": "16:9,4:5"}` (start from
+     [references/channel.example.json](references/channel.example.json)), say where you saved it, and
+     don't ask again. Posts ignore this question and the saved `aspect`.
+   - **After that,** use the saved formats without asking. A request that names a platform ("for
+     Reels", "a Facebook one too") gets `--aspect` for that run only, and `--aspect` replaces the
+     saved list: pass every format you want rendered (`--aspect 16:9,4:5,9:16`), or only the new one
+     when the others already exist from an earlier run with the same `-o`. Change the saved value only
+     when the user says so ("from now on", "always").
    - After the user approves a first thumbnail, offer to save their other choices (style, fonts,
-     `title_color` or `accent`) the same way. Save a color only when the user wants it on every
-     video; `auto` is decided per image, so leave it unsaved unless they ask.
+     `title_color` or `accent`) the same way; leave `auto` unsaved unless they ask.
 5. **Render** with `scripts/thumb.py` in this skill's folder (use its full path):
 
    ```bash
    python <skill-dir>/scripts/thumb.py CAPTURE --title "SIMON" --label "No hit · Parry only" -o out/simon
+   python <skill-dir>/scripts/thumb.py PHOTO --mode post --title "MAKE YOUR FIRST VIDEO" --body "Learn to frame a shot and record clear sound." --details "Saturday 24 October · 10 AM\nStudio 04 · Free" --backdrop solid -o out/post
    ```
 
-   With the default `--lead ab` this writes two variants, `_A` (title big) and `_B` (label big), each
-   as a master `.jpg` at the largest standard size the images support without upscaling (up to
-   3840x2160, for desktop upload), a `_phone.jpg` at 1280x720 under 2 MB (for phone upload), and a
-   `_preview.png` (feed sizes with the duration badge, 88 px notification, squint test).
+   A thumbnail writes two variants by default, `_A` (title big) and `_B` (label big), each as a master
+   `.jpg` at the largest standard size the images support without upscaling (up to 3840x2160), a
+   `_phone.jpg` at 1280x720 under 2 MB, and a `_preview.png` (feed sizes with the duration badge,
+   88 px notification, squint test). A post writes one image. Formats: `--aspect 16:9` (default),
+   `4:5` (feed, 1080x1350), `9:16` (Reels, Shorts, Stories, 1080x1920), a comma list, or `all`. Use
+   the same text for every format. The vertical formats put the type in a band, kept inside the
+   Reels/Shorts safe zone on 9:16.
 
-   Formats: `--aspect 16:9` (default, YouTube), `4:5` (Facebook and Instagram feed, 1080x1350),
-   `9:16` (Reels, Shorts, Stories, 1080x1920), a comma list, or `all`. Vertical formats crop to the
-   busiest part of the image (the subject) unless `--focus` is given, and put the type in a band
-   below the image, above it when there is a subject, or on the seam between stacked panels. In
-   9:16 the type stays inside the Reels/Shorts safe zone (clear of the top 14%, bottom 35% and
-   right 15%). Each vertical file gets a `_1080.jpg` copy when the master is larger, and a preview
-   in a Facebook feed card or under a Reels overlay with the profile-grid crop. Use the same text
-   for every format.
+   **The shade is automatic.** Without `--shade`, the script darkens the type side as little as it
+   can while every element keeps 7:1 contrast, so the picture shows more than it used to. Pass
+   `--shade N` only when the user wants a fixed darkness.
 
    **Mark the subject.** When the capture shows a person, character or product, look at it and pass
-   `--subject-box x0,y0,x1,y1` around the face (or the product's name or label), in fractions of the
-   image as given, the same way you estimate `--inset-box`. Box the face from the brows to the chin,
-   not the hair and not the whole body: type crossing a torso is fine, type or shade on a face is not. The script then puts the 16:9 type on
-   the side that keeps the box clear, centers the 4:5 and 9:16 crops on it, moves the 9:16 type band
-   to the top when that shades the face less, and warns when the box still ends up under type or
-   shade or out of frame. Each variant prints a `subject box:` line (in frame, visible, under shade,
-   under type). Not with `--panel` or `--subject` (a cut-out has its own overlap check).
+   `--subject-box x0,y0,x1,y1` around the face, from the brows to the chin (or around the product's
+   label). Type and shade then keep off it, and the warnings name a fix. Not with `--panel` or
+   `--subject`.
 
-   **A different picture for 4:5 and 9:16** is often better. The 9:16 type sits mid-frame (Reels
-   safe zone), so it needs a frame with the subject's face in the top third and something calm
-   below it. With a centered face, `--subject-box` moves the band to the top when that clears it and
-   warns when it can't; without a box the band stays at the bottom and shades it. When the wide capture
-   doesn't suit, ask for (or pick from the user's captures) one that does and render it in a second
-   run with `--aspect 4:5,9:16` (the same `-o` is fine: vertical files get `_4x5` and `_9x16`
-   suffixes, so the 16:9 files stay). The vertical crop centers on `--subject-box`; without one it follows
-   the busiest part of the frame, which is sometimes scenery: then pass a box or `--focus`.
-
-   **Subject in the middle?** In a 16:9 thumbnail the type and its shade then land on the subject
-   whichever side they take, and `--focus` can't help (it only moves the 16:9 crop on captures wider
-   than 16:9). With `--subject-box`, the warning prints a crop that clears it, e.g.
-   `try --crop 0.11,0,0.96,1 --text-side right`: re-run with it and keep the same `--subject-box`
-   (both take fractions of the image as given, so the box needs no recalculating). By hand: keep a narrower part of the
-   image with `--crop x0,y0,x1,y1` (fractions of the image as given): about 75-80% of the width, with
-   the subject toward the side away from the type. Narrower than 16:9, the art moves to the far side
-   and fades into the dark side. The crop applies to every format; bars are still trimmed. A crop
-   can also keep a second element in view that the box doesn't know about (the creator demo keeps
-   the camera phone visible this way).
-
-   Other flags: `--backdrop fade|solid` (what sits behind the type: fade darkens the photo into a shade, solid keeps the photo clean and puts the type on a solid `--bg` panel), `--style serif|sans` (default title look), `--kicker TEXT` / `--subtitle TEXT` (small
-   lines above or below the big type; see the type rules), `--feather 0..1` (fade length of narrow or
-   cropped art; shorten it when the fade reaches a face), `--shade 0..1` and `--bg #hex` (darkness and
-   color of the type side), `--subject-box x0,y0,x1,y1`, `--band auto|top|bottom` (type band on 4:5 and 9:16),
-   `--text-side left|right`, `--focus 0..1` (crop position on wide captures),
-   `--logo logo.png --logo-white` (logo as the title), `--title-font NAME|FILE` / `--label-font`,
-   `--list-fonts`, `--system-fonts` (installed faces instead of the bundled defaults; the look then
-   varies by machine), `--title-tracking 0..0.5` (big type letter spacing in em), `--title-color white|auto|#hex` (big type) / `--accent white|auto|#hex` (label
-   box), `--size 720p|1080p|1440p|4k`, `--feed DIR` (place both variants among other thumbnails).
-   Each variant prints `title type: ...` and `colors: ...`, so you can tell the user what was used.
-
+   **Subject in the middle, or a wide frame that doesn't suit 4:5 and 9:16:** use `--crop`, or a
+   second capture in a second run with `--aspect 4:5,9:16`
+   ([recipes](references/flags.md#recipes)). Every flag (including `--channel`, `--no-trim`,
+   `--no-system-fonts`, `--no-logo-white`), post mode details and input formats:
+   [references/flags.md](references/flags.md). Each variant prints `title type:` and `colors:`.
 6. **Check** before handing back:
-   - Read every `warning:` line and fix the cause (switch side, move the crop or inset box, shorten
-     the text, use a bigger cut-out, recapture). Never hand back a thumbnail with an open warning
-     without saying so.
-   - Open each preview: the big type must read at 168 px. If it doesn't, shorten it.
-   - In the squint tile, the big type and the subject should be the two things that survive. If a
-     bright patch outweighs both, change the crop, the side or the image. A thin or detailed logo
-     often fades here while big type holds; say so, since that is what variant B is for.
-   - Read the `subject box:` line of every variant. If the box is shaded or under type on 16:9,
-     re-run with the `--crop` the warning suggests (step 5) instead of shrinking the type. On 9:16
-     the type must stay inside the Reels safe zone, so the script can only move the band to the top
-     or bottom (it does so itself, and the warning names `--band` when the other band clears the
-     face): if the face is still shaded, check the box runs from the brows to the chin, shorten the
-     text, or use another frame for the vertical formats (step 5), and tell the user if the 9:16 face
-     stays shaded.
-   - Without a box (no person or product), check in the 4:5 and 9:16 previews that the crop kept
-     what matters; if it framed scenery, pass `--focus`.
-   - With `auto` color, check the `colors:` line and the preview: the color should be the one the
-     image is known for. If it took a side color (a red sign in a blue scene), give the hex code of
-     the right one or go back to white.
+   - Read every `warning:` and `note:` line and fix the cause (the table in
+     [references/flags.md](references/flags.md#notes-and-warnings) lists each fix). Never hand back a
+     thumbnail with an open warning without saying so.
+   - Open each preview: the big type must read at 168 px; shorten text that doesn't. A logo that
+     fades there may ship only as A beside a B whose hook reads; say so. In the squint tile, the big
+     type and the subject should be the two things that survive; if a bright patch outweighs both,
+     change the crop, the side or the image.
+   - **Look at the capture itself for HUD:** the lighter shade shows more of the frame. Check each
+     corner and the bottom edge for HUD, performance overlays (RTSS, Afterburner stats), button
+     prompts, objective text and toasts. `--crop` them out or ask for a clean capture; the script
+     does not detect them.
+   - Read the `subject box:` line of every variant, and open the last preview tile, which outlines
+     `--subject-box` (cyan) and `--inset-box` (amber): the box must hold the face or screen. If the
+     box is shaded or under type on 16:9, re-run with the `--crop` the warning suggests instead of
+     shrinking the type. On 9:16 the script can only move the band to the top or bottom; if the face
+     is still shaded, shorten the text or use another frame, and tell the user if it stays shaded.
+   - Without a box, check in the 4:5 and 9:16 previews that the crop kept what matters; if it framed
+     scenery, pass `--focus`.
+   - With `auto` color, the `colors:` line and preview should show the color the image is known for;
+     if it took a side color (a red sign in a blue scene), give the right hex code or use white.
    - With a subject, check that it looks photographed with the background: no halo, no mismatched
-     color or sharpness. The script prints what it matched.
-   - If the user has screenshots of current top thumbnails on the topic, pass them with `--feed DIR`
-     and look at `_feed.png`: theirs should stand out.
+     color or sharpness.
+   - With screenshots of current top thumbnails on the topic, pass them with `--feed DIR` and look at
+     `_feed.png`: yours should stand out.
 7. **Hand back.** A thumbnail: both variants (master and phone copy), the previews, the text used,
-   and the title look and colors (from the `title type:` and `colors:` lines). The pair is for
-   YouTube's Test & Compare, which takes up to three thumbnails per video and picks the winner on
-   watch time share, not click-through rate; clearly different thumbnails finish faster. Let the test
-   pick, not you, and don't promise a third variant. A post: the image, its preview and the text
-   exactly as placed, with the sizes from the `post text:` line; it is one image, not an A/B pair.
+   and the title look and colors. For a 16:9 long-form video the pair is for YouTube's Test &
+   Compare, which takes up to three thumbnails per video and picks the winner on watch time share,
+   not click-through rate; clearly different thumbnails finish faster. It is not available for
+   Shorts, Premieres, scheduled lives, made-for-kids or private videos. For 9:16 and 4:5 covers, ship
+   one variant (`--lead title` or `--lead label`) or let the user pick by eye. Let the test pick, not
+   you, and don't promise a third variant. A post: the image, its preview, and the text exactly as
+   placed (the `body:` and `details:` lines under `post text:`, with the sizes); it is one image, not
+   an A/B pair.
 
 ## Fixed specs
 
-Master up to 3840x2160 (YouTube accepts up to 50 MB from desktop); phone copy 1280x720 under 2 MB.
-4:5 master up to 2160x2700 with a 1080x1350 copy; 9:16 up to 2160x3840 with a 1080x1920 copy.
-Type stays out of the bottom-right corner, where the duration badge sits (sized to the badge at
-168 px), inside the Reels/Shorts
-safe zone on 9:16, and inside the frame everywhere; it shrinks to fit the height and width, and
-warns if it still can't. Every element (title or hook lines, kicker, subtitle, label box, logo,
-panel labels) needs WCAG 4.5:1 contrast against what is behind it; the script darkens the type
-area once when light type fails because of the background, and names the element and the fix when
-it can't (a brighter background, or a `--title-color` or `--accent` too dark to read). `auto`
-colors are lightened until they pass; a hand-picked color is never changed, only flagged.
-
-Inputs are checked rather than guessed: a missing named font, an opaque logo, a fully transparent
-cut-out, `--inset`/`--subject`/`--crop`/`--subject-box` with `--panel`, `--subject-box` with
-`--subject`, a `--crop` that leaves nothing, bad channel settings and an `-o` that would overwrite an
-input all stop with a clear message. Letterbox and pillarbox bars (including video black 16 and
-bars carrying subtitles) are trimmed; dark scene edges such as a night sky are kept.
+Master up to 3840x2160 with a 1280x720 phone copy under 2 MB; 4:5 and 9:16 get a 1080-wide copy.
+Type stays out of the duration-badge corner and inside the frame; on 9:16 it stays inside the
+Reels/Shorts safe zone, a conservative preset (clear of the top 14%, bottom 35% and right 15%;
+Meta's Reels ad guide suggests 14%, 35% and 6% per side, and neither platform publishes an organic
+cover spec). Every element needs WCAG 4.5:1 contrast. More: [flags.md](references/flags.md#fixed-specs).
