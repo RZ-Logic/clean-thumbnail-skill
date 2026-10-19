@@ -1126,12 +1126,21 @@ def compose_panels(srcs, cv, bg, shade=0.88, top_shade=False, band_top=None, ban
     return canvas, scales
 
 
-def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture_ref=None, area=None):
+REELS_FACE = 0.40  # 9:16: the top share of a cut-out (the head) that should end above the Reels/Shorts caption line
+
+
+def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture_ref=None, area=None, post=None):
     """Cut-outs away from the type (beside it on wide canvases, below it on tall ones),
     bottom-anchored, never into the type column, matched to what is behind them. area (wide canvases,
-    --backdrop solid): the photo rect, whose columns the cut-outs keep to.
-    Returns (canvas, match reports, mask of where the subjects landed)."""
+    --backdrop solid): the photo rect, whose columns the cut-outs keep to. On 9:16 a cut-out is made tall
+    enough for its top REELS_FACE to end above the caption area, where the type band leaves the room; one
+    whose top third (the face) still falls under it is flagged. post (default: a canvas with the post column,
+    see _load_sources): the fixes never ask to cut words. Returns (canvas, match reports, mask of where the subjects
+    landed)."""
     n = len(subjects)
+    if post is None:
+        post = cv.col_share == POST_COL_SHARE
+    room = cv.h
     if area is not None and not cv.tall:
         x0, x1 = area[0], area[2]
         target_h = int(cv.h * (0.94 if n == 1 else 0.84))
@@ -1141,8 +1150,12 @@ def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture
         if band is not None:  # stay below the type band
             room = cv.h - band[1] - cv.px(16)
             if room < cv.h * 0.3:
-                warnings.append("the type leaves little room for the subject below it: shorten the text.")
-            target_h = max(int(cv.h * 0.2), min(target_h, room))
+                warnings.append("the type leaves little room for the subject below it: %s."
+                                % ("use --aspect 16:9, where the text sits beside the subject" if post
+                                   else "shorten the text"))
+        if cv.reels:
+            target_h = max(target_h, reels_face_height(cv))
+        target_h = max(int(cv.h * 0.2), min(target_h, room))
     else:
         if text_side == "left":
             x0, x1 = cv.margin + cv.col_w + cv.px(20), cv.w
@@ -1163,12 +1176,16 @@ def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture
         if not cv.tall:  # never into the type column
             px = max(px, x0) if text_side == "left" else min(px, x1 - s.width)
         py = cv.h - s.height
+        if cv.reels and py + s.height / 3.0 > cv.safe_box[3]:
+            warnings.append("subject %d's face (the top third of the cut-out) falls under the Reels/Shorts caption "
+                            "area: %s." % (i + 1, reels_face_fix(cv, subj, n, room, post)))
         vis = (max(0, px), max(0, py), min(cv.w, px + s.width), cv.h)
         if (vis[2] - vis[0]) < 0.85 * s.width:
             warnings.append("subject %d is %d%% off the frame edge: use fewer subjects or a narrower cut-out."
                             % (i + 1, round(100 * (1 - (vis[2] - vis[0]) / s.width))))
-        behind = canvas.crop(vis).resize(s.size)
-        tex = texture_ref.crop(vis).resize(s.size) if texture_ref is not None else None
+        # match_layer reads only statistics from what is behind: the visible part as it is, never stretched
+        behind = canvas.crop(vis)
+        tex = texture_ref.crop(vis) if texture_ref is not None else None
         s, rep = match_layer(s, behind, cv, seed=i, texture_ref=tex)
         reports.append(rep)
         rgba = canvas.convert("RGBA")
@@ -1178,6 +1195,26 @@ def place_subjects(canvas, subjects, cv, text_side, warnings, band=None, texture
         footprint.paste(s.getchannel("A"), (px, py))
         mask = ImageChops.lighter(mask, footprint)
     return canvas, reports, mask
+
+
+def reels_face_height(cv, share=REELS_FACE):
+    """Height a bottom-anchored cut-out needs on 9:16 for its top `share` to end above the caption line."""
+    return int(np.ceil((cv.h - cv.safe_box[3]) / (1.0 - share)))
+
+
+def reels_face_fix(cv, subj, n, room, post=False):
+    """The fix for a 9:16 cut-out whose face falls under the caption area, as place_subjects would size it: one
+    subject when that alone lifts the face clear; else more room (the type band limits the height) or a cut-out
+    that can be shown taller (the frame width limits it)."""
+    s = crop_to_alpha(subj)
+    need = reels_face_height(cv, 1 / 3.0)
+    one = max(int(cv.h * 0.2), min(max(int(cv.h * 0.66), reels_face_height(cv)), room))
+    if n > 1 and s.height * min(one / s.height, cv.w / s.width) >= need:
+        return "use one subject for 9:16"
+    if room < need:
+        return ("use --aspect 16:9, where the text sits beside the subject" if post
+                else "shorten the text so the cut-out can be larger")
+    return "use a cut-out from head to waist or lower (taller than it is wide), which can be shown larger"
 
 
 def place_inset(canvas, inset, box, mapper, cv, warnings, clip=None):
@@ -1525,7 +1562,10 @@ def place_panel_labels(layer, canvas, cv, rects, labels, lspec, band, bg, warnin
             lo, hi = y0 + cv.px(8), y1 - h - cv.px(8)
             slo, shi = (max(lo, safe[1]), min(hi, safe[3] - h)) if cv.reels else (lo, hi)
             safe_room = slo <= shi
-            raw = [y0 + cv.px(32), band[0] - h - cv.px(12), band[1] + cv.px(12)]
+            # the panel's bottom corner (as seen: on 9:16 the caption area hides the rest) before the spot just
+            # under the band, where a label at the type's margin reads as one more line of the type stack
+            corner = min(y1, safe[3]) if cv.reels else y1
+            raw = [y0 + cv.px(32), band[0] - h - cv.px(12), corner - h - cv.px(32), band[1] + cv.px(12)]
             # each preferred spot (nudged into the safe zone if needed) in order, then anywhere in the panel
             cands = [c if slo <= c <= shi else min(max(c, slo), shi) for c in raw if slo <= shi]
             cands += [min(max(c, lo), hi) for c in raw if lo <= hi]
@@ -1557,6 +1597,13 @@ def place_panel_labels(layer, canvas, cv, rects, labels, lspec, band, bg, warnin
         if not cv.tall and chosen[2] > x1 - cv.px(8):
             flagged.add(label_name)
             warnings.append("panel %d's label is wider than its panel: shorten it." % (i + 1))
+        near = cv.px(160)
+        if cv.tall and band is not None and chosen[1] < band[1] + near and chosen[3] > band[0] - near:
+            # still close to the type stack (9:16 keeps it in the safe zone): the column's right edge sets it apart
+            rx = cv.margin + cv.col_w - bw
+            moved = (rx, chosen[1], rx + bw, chosen[3])
+            if rx > lx and not any(overlaps(moved, p) for p in placed):
+                chosen = moved
         placed.append(chosen)
         pad = cv.px(6)
         scrim = Image.new("L", canvas.size, 0)
@@ -1712,6 +1759,7 @@ class Job:
     image_rect: tuple = None
     # set by _compose
     built: dict = None
+    given: dict = None  # render()'s arguments as passed, for re-runs that confirm a suggested fix (_rerun)
 
 
 def _check_args(j):
@@ -1862,6 +1910,10 @@ def _choose_layout(j):
             else:
                 info["notes"].append("--band %s is ignored with %s, which sets where the type goes"
                                      % (j.band_pos, "--panel" if layout == "panels" else "--subject"))
+        if text_side != "auto":  # the type is a band across the frame, never a column
+            info["notes"].append("--text-side %s is ignored on %s, where the type sits in a band across the frame%s"
+                                 % (text_side, j.aspect, "; --band top or --band bottom moves it"
+                                    if layout == "single" and not subjects else ""))
         text_side = "left"
         info["text_side"] = anchor
     else:
@@ -1876,6 +1928,9 @@ def _choose_layout(j):
                 left, right = busyness(src)
                 text_side = "left" if left <= right else "right"
         info["text_side"] = text_side if layout == "single" else "bottom"
+        if narrow and focus is not None and j.backdrop != "solid":  # compose_single shows narrow art whole
+            info["notes"].append("--focus is ignored: the art is narrower than 16:9, so it is shown whole beside the "
+                                 "type; --crop picks the part shown")
     bg = rgb(bg) if bg else dark_tone(backgrounds[0])
     # --push only ever softens the photo behind a cut-out; a channel file's push must not blur plain captures
     push = (0.5 if push is None else push) if subjects else 0.0
@@ -2053,6 +2108,8 @@ def _type_room(j):
         avail = _tall_avail(j, safe, anchor)
     elif layout == "panels":
         max_w, base = int(cv.w * 0.56), 110
+        if j.mode != "post":  # centered at the bottom: its right half stays left of the duration badge
+            max_w = min(max_w, 2 * (cv.timestamp_zone[0] - cv.px(12) - cv.w // 2))
         avail = min(cv.h - cv.px(64) - cv.px(150), int(cv.h * 0.36))  # the panels stay the picture
     else:
         max_w, base = cv.col_w, (POST_BIG_BASE if j.mode == "post" else 190)
@@ -2083,6 +2140,15 @@ def _tall_avail(j, safe, anchor):
             cv.h * (1 - POST_IMAGE_SHARE) - pad - (safe[1] + cv.px(16))
         return int(min(safe[3] - safe[1], edge))
     return safe[3] - safe[1] if anchor == "bottom" else int(min(safe[3] - safe[1], cv.h * 0.42))
+
+
+def _badge_fix(j):
+    """The fix for 16:9 type that reaches the duration-badge corner. Panel type is fitted left of it and a type
+    column on the right stops above it (_type_room), so only a block too tall for that room gets there; the left
+    column never reaches the corner."""
+    if j.layout == "panels":
+        return "shorten the title or the label"
+    return "use --text-side left" if j.text_side == "right" else "shorten the text"
 
 
 def _post_sizes(j, body_cap):
@@ -2181,6 +2247,7 @@ def _pick_anchor(j):
     keeps it clearly more in view than the bottom (bottom stays the default) and --band did not set it."""
     cv = j.cv
     if not (cv.tall and j.layout == "single" and j.subject_box is not None):
+        _inset_anchor(j)
         return
     solid = j.backdrop == "solid"
     focus = j.focus_eff
@@ -2230,6 +2297,33 @@ def _pick_anchor(j):
         j.info["notes"].append("crop moved up or down to keep --subject-box clear of the type band (vertical focus "
                                "%.2f)" % scores[j.anchor]["vfocus"])
     j.vfocus = scores[j.anchor]["vfocus"]
+
+
+def _inset_anchor(j):
+    """Tall canvases with --inset (and no --subject-box, cut-out or --band): place_inset paints the inset over the
+    band's shade, so type on it is unshaded. The band moves to the top when the bottom band's type block lands on
+    the inset and the top band's lands on less of it."""
+    cv = j.cv
+    if not (cv.tall and j.layout == "single" and j.inset is not None and not j.subjects and not j.band_forced
+            and j.backdrop != "solid" and j.anchor == "bottom"):
+        return
+    focus = j.focus_eff
+    if focus is None:  # as compose_tall picks it
+        focus = subject_focus(j.src, (cv.w / max(cv.w / j.src.width, cv.h / j.src.height)) / j.src.width)
+    ir = box_rect(j.inset_box or (0.25, 0.25, 0.75, 0.75), tall_view(j.src, cv, focus, j.vfocus, j.shade, (0, 0),
+                                                                      "bottom")[0])
+    on, avail = {}, {}
+    for anchor in ("bottom", "top"):
+        avail[anchor] = _tall_avail(j, j.safe, anchor)
+        _, bw, bh = _fit_block(j, avail[anchor])[:3]
+        top = tall_band(cv, j.safe, bh, anchor)[0]
+        on[anchor] = _under_type((cv.margin, top, cv.margin + bw, top + bh), [ir], cv)  # share of the block on it
+    if on["bottom"] > 0 and on["top"] < on["bottom"]:
+        j.anchor, j.avail = "top", avail["top"]
+        j.info["text_side"] = "top"
+        j.info["notes"].append("type band at the top, %s the inset (%d%% of the type block over it there, %d%% at "
+                               "the bottom)" % ("clear of" if on["top"] <= 0 else "off most of",
+                                                round(100 * on["top"]), round(100 * on["bottom"])))
 
 
 def _fit_type(j):
@@ -2419,12 +2513,18 @@ def _under_type(rect, boxes, cv):
 
 def _wide_side(j, side, focus, shade):
     """--subject-box with the 16:9 type on `side` and the crop at `focus`, without rendering: (inside, visibility,
-    heavy, share under the type, type over the inset?). The drawn type is mirrored for the other side."""
+    heavy, share under the type, type over the inset?). The drawn type is mirrored for the other side, and moved
+    to where _place_band puts it there (on the right it stays above the duration badge)."""
     cv = j.cv
     mapper, vis = wide_view(j.src, cv, side, focus, j.feather, shade, j.cropped)
     rect = box_rect(j.subject_box, mapper)
     inside, v, heavy = box_cover(rect, cv, vis_x=vis)
-    boxes = [b if side == j.text_side else (cv.w - b[2], b[1], cv.w - b[0], b[3]) for _, b in j.built["elements"]]
+    dy = 0
+    if side != j.text_side:
+        limit = cv.timestamp_zone[1] - cv.px(12) if side == "right" and j.mode != "post" else j.safe[3]
+        dy = max(j.safe[1], min(int(cv.h * 0.5 - j.bh / 2), limit - j.bh)) - j.top
+    boxes = [b if side == j.text_side else (cv.w - b[2], b[1] + dy, cv.w - b[0], b[3] + dy)
+             for _, b in j.built["elements"]]
     on_inset = False
     if j.inset is not None:
         ir = box_rect(j.inset_box or (0.25, 0.25, 0.75, 0.75), mapper)
@@ -2452,6 +2552,121 @@ def _crop_advice(j, sides, keep):
             return None
     return suggest_crop(j.subject_box_given, j.given_size, j.cv, sides, j.feather, j.shade, bars=(tb[0], tb[2]),
                         kept_h=kept_h, y=y, keep=keep, exact=exact)
+
+
+_RERUNS = []  # the changes _rerun is confirming; a re-run suggests no re-run-confirmed fixes of its own
+
+
+def _rerun(j, **changes):
+    """Render this job again with some arguments changed, to confirm that a fix a warning names works. Returns the
+    re-run's info dict, or None inside a re-run (no nesting) or when the changed arguments are rejected."""
+    if _RERUNS or j.given is None:
+        return None
+    args = {k: v for k, v in j.given.items() if k not in ("j", "info")}
+    args.update(changes)
+    _RERUNS.append(changes)
+    try:
+        return render(**args)[1]
+    except ValueError:
+        return None
+    finally:
+        _RERUNS.pop()
+
+
+def _type_clear(r, contrast):
+    """A re-run's info: its type is off the inset and reads at least as well as `contrast` (or passes)."""
+    on_inset = "inset_rect" in r and overlaps(r["text_box"], r["inset_rect"])
+    return not on_inset and r["contrast"] >= min(MIN_CONTRAST, contrast)
+
+
+def _given_box(j, box):
+    """A box in fractions of the kept background (after the bar trim and --crop) back in fractions of the capture
+    as given, where --inset-box and --subject-box are written."""
+    (kx0, ky0, kx1, ky1), (W, H) = j.kept_px, j.given_size
+    return ((kx0 + box[0] * (kx1 - kx0)) / W, (ky0 + box[1] * (ky1 - ky0)) / H,
+            (kx0 + box[2] * (kx1 - kx0)) / W, (ky0 + box[3] * (ky1 - ky0)) / H)
+
+
+def _fmt(values):
+    return ",".join(("%.2f" % v).rstrip("0").rstrip(".") for v in values)
+
+
+def _inset_fix(j):
+    """One fix for type over the inset, confirmed by a re-run: the other --band (4:5, 9:16) or --text-side (16:9);
+    else an --inset-box shrunk (same shape, same outer edge) to end clear of the type block; else the general
+    advice. Cached in j.built."""
+    if "inset_fix" in j.built:
+        return j.built["inset_fix"]
+    cv, info = j.cv, j.info
+    contrast = info.get("contrast", 0.0)
+    fix = None
+    if cv.tall and j.layout == "single" and not j.subjects and j.backdrop != "solid":
+        flip = "top" if j.anchor == "bottom" else "bottom"
+        r = _rerun(j, band=flip)
+        if r is not None and _type_clear(r, contrast):
+            fix = "use --band %s, which keeps the type off it" % flip
+    elif not cv.tall and j.layout == "single":
+        other = "right" if j.text_side == "left" else "left"
+        r = _rerun(j, text_side=other)
+        if r is not None and _type_clear(r, contrast):
+            fix = "use --text-side %s, which keeps the type off it" % other
+    rect, bbox, mapper = info.get("inset_rect"), j.built["bbox"], j.built["mapper"]
+    if fix is None and cv.tall and rect is not None and mapper is not None:
+        ib = _given_box(j, j.inset_box or (0.25, 0.25, 0.75, 0.75))
+        ytop, ybot = mapper(0.0, 0.0)[1], mapper(0.0, 1.0)[1]
+
+        def frac(y):  # canvas y -> fraction of the capture as given
+            return _given_box(j, (0.0, (y - ytop) / (ybot - ytop), 1.0, 1.0))[1]
+        pad = cv.px(24)
+        if rect[1] < bbox[1]:  # the inset starts above the type: end it above the block, keep its top edge
+            k = (frac(bbox[1] - pad) - ib[1]) / (ib[3] - ib[1])
+            cx, w = (ib[0] + ib[2]) / 2, (ib[2] - ib[0]) * k
+            new = (cx - w / 2, ib[1], cx + w / 2, ib[1] + (ib[3] - ib[1]) * k)
+        else:  # the inset starts below the type's top: start it below the block, keep its bottom edge
+            k = (ib[3] - frac(bbox[3] + pad)) / (ib[3] - ib[1])
+            cx, w = (ib[0] + ib[2]) / 2, (ib[2] - ib[0]) * k
+            new = (cx - w / 2, ib[3] - (ib[3] - ib[1]) * k, cx + w / 2, ib[3])
+        new = tuple(round(v, 2) for v in new)
+        if 0.25 <= k < 1 and 0 <= new[0] < new[2] <= 1 and 0 <= new[1] < new[3] <= 1:
+            r = _rerun(j, inset_box=new)
+            if r is not None and _type_clear(r, contrast):
+                fix = "use --inset-box %s (the same shape, smaller), which ends clear of the type" % _fmt(new)
+    if fix is None:
+        fix = ("use a smaller --inset-box, clear of the type band, or a background with room above or below the "
+               "screen or frame" if cv.tall else "use a background with room beside the screen or frame")
+    j.built["inset_fix"] = fix
+    return fix
+
+
+def _check_inset(j):
+    """Type over the inset image: warn with _inset_fix."""
+    if "inset_rect" in j.info and overlaps(j.built["bbox"], j.info["inset_rect"]):
+        j.info["warnings"].append("type overlaps the inset image: %s." % _inset_fix(j))
+
+
+def _tall_contrast_fix(j):
+    """The fix for light type on a bright patch on 4:5 and 9:16 (16:9 has --text-side and --crop): with the type
+    over the inset, _inset_fix; else the other --band when a re-run confirms it reads there; --focus only when the
+    capture is wider than the crop, so moving it changes what is behind the type."""
+    if "contrast_fix" in j.built:
+        return j.built["contrast_fix"]
+    cv, src = j.cv, j.src
+    fix = None
+    if "inset_rect" in j.info and overlaps(j.built["bbox"], j.info["inset_rect"]):
+        fix = _inset_fix(j)
+    elif j.layout == "panels":
+        fix = "use darker captures"
+    else:
+        if not j.subjects:
+            flip = "top" if j.anchor == "bottom" else "bottom"
+            r = _rerun(j, band=flip)
+            if r is not None and r["contrast"] >= MIN_CONTRAST:
+                fix = "use --band %s, where it reads" % flip
+        if fix is None:
+            wider = src.width / src.height > cv.w / cv.h * 1.02
+            fix = "use --focus to move the crop, or a darker image" if wider else "use a darker image"
+    j.built["contrast_fix"] = fix
+    return fix
 
 
 def _focus_fix(j):
@@ -2511,19 +2726,126 @@ def _wide_fix(j, shade_bad, overlap_bad):
     def score(m):
         return 0.0 if m[4] else m[0] * m[1] * (1 - m[3])
     if score(om) >= score(cm) + 0.10:
-        return "use --text-side %s, which shows more of it, or shorten the text" % other
+        return "use --text-side %s, which shows more of it, or %s" % (other, _shorten(j))
     if not shade_bad:
-        return "shorten the text"
+        return _shorten(j)
     what = ("no --crop keeps both the inset and --subject-box clear of the type" if keep
             else "no --crop clears it beside the type column")
-    return "%s; %suse another frame" % (what, "shorten the text or " if overlap_bad else "")
+    return "%s; %suse another frame" % (what, "shorten the text or " if overlap_bad and j.mode != "post" else "")
+
+
+def _shade_judged(rect, cv, band, anchor):
+    """The part of a --subject-box rect whose shade counts: on 9:16 with the band at the bottom, the rows above the
+    band's lower edge. Below it is the caption area, which band_alpha keeps at a light 0.35 on purpose and the
+    safe-zone check already flags; shortening the text can't lift that. None when no row counts."""
+    if cv.reels and anchor == "bottom" and band is not None and rect[3] > band[1]:
+        return None if rect[1] >= band[1] else (rect[0], rect[1], rect[2], band[1])
+    return rect
+
+
+def _shorten(j):
+    """The text fix: a post's words are never cut, so a post gets another frame instead."""
+    return "use a frame with more room around the subject" if j.mode == "post" else "shorten the text"
+
+
+TALL_MIN_CLEAR = 0.8  # visibility a suggested 4:5 or 9:16 --crop must give the box (the warning fires under 0.7)
+
+
+def _tall_crop_clears(j, kept, box, views):
+    """Quick check for _tall_crop_fix: whether some vertical crop of a kept capture of `kept` (w, h) px, at this
+    canvas's geometry, puts the box (fractions of it) in view, out of the band's heavy shade and off the type, for
+    one of the band positions in views ({anchor: (band, type boxes)}). Returns the first anchor that does, or None."""
+    cv = j.cv
+    kw, kh = kept
+    scale = max(cv.w / kw, cv.h / kh)
+    share, ch = (cv.w / scale) / kw, cv.h / scale
+    if j.focus is not None:
+        focus = j.focus
+    else:  # focus_on
+        focus = 0.5 if share >= 1 else min(max(((box[0] + box[2]) / 2 - share / 2) / (1 - share), 0.0), 1.0)
+    grid = [None]
+    if ch < kh:  # vfocus_on's default first, then _pick_anchor's grid
+        grid = [min(max(((box[1] + box[3]) / 2 * kh - 0.40 * ch) / (kh - ch), 0.0), 1.0)]
+        grid += [i / 50.0 for i in range(51)]
+    for anchor, (band, boxes) in views.items():
+        vis = 1 - band_alpha(cv, j.shade, band, anchor)
+        for vf in grid:
+            (sx, sy, _, _), s = cover_box(kw, kh, cv.w, cv.h, focus, vf)
+            rect = ((box[0] * kw - sx) * s, (box[1] * kh - sy) * s, (box[2] * kw - sx) * s, (box[3] * kh - sy) * s)
+            inside = box_cover(rect, cv, vis_y=vis, region=box_region(cv))[0]
+            judged = _shade_judged(rect, cv, band, anchor)
+            v, heavy = box_cover(judged, cv, vis_y=vis)[1:] if judged is not None else (1.0, 0.0)
+            if inside >= 0.9 and v >= TALL_MIN_CLEAR and heavy <= 0.1 and _under_type(rect, boxes, cv) <= 0.10:
+                return anchor
+    return None
+
+
+def _tall_crop_fix(j):
+    """4:5 and 9:16 --subject-box: a --crop (fractions of the capture as given) narrower than the format, around
+    the box, so the cover crop zooms in and can move up or down to put the box in view and clear of the type band.
+    Widest first (least zoom) in 0.01 steps while the upscale stays at 1.5x or less; _tall_crop_clears picks
+    candidates and a re-run with the crop confirms one (up to 3). Returns the fix, or None. Cached in j.built."""
+    if "crop_fix" in j.built:
+        return j.built["crop_fix"]
+    j.built["crop_fix"] = None
+    cv = j.cv
+    if j.src_given is None or j.given is None or _RERUNS:
+        return None
+    W, H = j.given_size
+    tb = trim_box(j.src_given)
+    box = j.subject_box_given
+    views = {j.anchor: (j.band, [b for _, b in j.built["elements"]])}
+    if not j.band_forced:  # the type at the other band: the same block, moved
+        other = "top" if j.anchor == "bottom" else "bottom"
+        top, band = tall_band(cv, j.safe, _fit_block(j, _tall_avail(j, j.safe, other))[2], other)
+        views[other] = (band, [(b[0], b[1] + top - j.top, b[2], b[3] + top - j.top) for _, b in j.built["elements"]])
+    sw, sh = ASPECTS[j.aspect]["sizes"][-1]  # a narrow crop gets the smallest canvas
+
+    def crops(y):  # with a --crop that cuts the height: its own width first, then narrower ones around the box
+        ky = min(tb[3], y[1] * H) - max(tb[1], y[0] * H)
+        if j.crop is not None and y != (j.crop[1], j.crop[3]):
+            yield (j.crop[0], y[0], j.crop[2], y[1])
+        for k in range(int(cv.w / cv.h * ky / W * 100), 0, -1):
+            a0 = min(max(round((box[0] + box[2]) / 2 - k / 200.0, 2), 0.0), round(1 - k / 100.0, 2))
+            yield (a0, y[0], round(a0 + k / 100.0, 2), y[1])
+    ys = [(0.0, 1.0)]  # a --crop's own height first, then the full height
+    if j.crop is not None and (j.crop[1], j.crop[3]) != (0.0, 1.0):
+        ys.insert(0, (j.crop[1], j.crop[3]))
+    tried = 0
+    for y in ys:
+        ky0, ky1 = max(tb[1], y[0] * H), min(tb[3], y[1] * H)
+        if box[1] < y[0] or box[3] > y[1] or ky1 - ky0 < 16:
+            continue
+        for crop in crops(y):
+            if box[0] < crop[0] or box[2] > crop[2]:
+                break  # narrower than the box
+            kx0, kx1 = max(tb[0], crop[0] * W), min(tb[2], crop[2] * W)
+            if kx1 - kx0 < 16 or max(sw / (kx1 - kx0), sh / (ky1 - ky0)) > 1.5:
+                break
+            kb = ((box[0] * W - kx0) / (kx1 - kx0), (box[1] * H - ky0) / (ky1 - ky0),
+                  (box[2] * W - kx0) / (kx1 - kx0), (box[3] * H - ky0) / (ky1 - ky0))
+            anchor = _tall_crop_clears(j, (kx1 - kx0, ky1 - ky0), kb, views)
+            if anchor is None:
+                continue
+            flip = {"band": anchor} if anchor != j.anchor else {}
+            r = _rerun(j, crop=crop, **flip)
+            tried += 1
+            sb = (r or {}).get("subject_box")
+            if (sb and sb["inside"] >= 0.9 and sb["visibility"] >= TALL_MIN_CLEAR and r["scale"] <= 1.5
+                    and r["contrast"] >= min(MIN_CONTRAST, j.info.get("contrast", 0.0))
+                    and not any("--subject-box" in w for w in r["warnings"])):
+                j.built["crop_fix"] = "try --crop %s%s" % (_fmt(crop), " --band %s" % anchor if flip else "")
+                return j.built["crop_fix"]
+            if tried >= 3:
+                return None
+    return None
 
 
 def _check_subject_box(j):
     """Where --subject-box landed in the finished picture: in frame (Reels: the safe zone), under the
     shade, under the type. Each problem gets a warning that names its fix (one fix when the shade and the
     type both hit it): 16:9 tries --focus, a computed --crop or the other side; 4:5 and 9:16 the other
-    --band. Measurements go in info["subject_box"]."""
+    --band, then a computed --crop that a re-run confirms. Measurements go in info["subject_box"]."""
     if j.subject_box is None:
         return
     cv, built, info = j.cv, j.built, j.info
@@ -2567,28 +2889,44 @@ def _check_subject_box(j):
             if m and m["inside"] >= 0.9:
                 fix = "use --band %s, which keeps it in the photo" % flip
             elif cv.tall and down < across:
-                fix = ("the photo %s the type panel is too short for it; shorten the text or use a frame with more "
-                       "room around the subject" % ("above" if j.anchor == "bottom" else "below"))
+                fix = ("the photo %s the type panel is too short for it; %s" % (
+                    "above" if j.anchor == "bottom" else "below",
+                    "use a frame with more room around the subject" if j.mode == "post"
+                    else "shorten the text or use a frame with more room around the subject"))
             elif cv.tall:
                 fix = "move the crop with --focus (0 = left edge, 1 = right edge) or tighten --crop around it"
             else:
                 fix = ("move the crop with --focus (0 = left edge, 1 = right edge), tighten --crop around it, or use "
                        "--text-side %s" % ("right" if j.text_side == "left" else "left"))
-        elif down < across and cv.tall:  # cut at the top or bottom: --focus only moves the crop sideways
-            fix = ("it sits too %s in the capture for this format; use a frame with more room %s the subject"
-                   % (("high", "above") if rect[1] < rg[1] else ("low", "below")))
-        elif cv.tall:
-            fix = "move the crop with --focus (0 = left edge, 1 = right edge) or tighten --crop around it"
+        elif cv.tall:  # the other band, or a narrower --crop that lets the crop move up or down (--focus can't)
+            flip = "top" if j.anchor == "bottom" else "bottom"
+            m = (j.band_scores or {}).get(flip)
+            if m and m["inside"] >= 0.9 and m["inside"] > inside:
+                fix = "use --band %s, which keeps it in view" % flip
+            elif _tall_crop_fix(j):
+                fix = _tall_crop_fix(j)
+            elif down < across:  # cut at the top or bottom
+                fix = ("it sits too %s in the capture for this format; use a frame with more room %s the subject"
+                       % (("high", "above") if rect[1] < rg[1] else ("low", "below")))
+            elif j.focus is not None:  # cut at a side: the crop centers the box unless --focus moves it
+                fix = "drop --focus, so the crop centers it"
+            else:
+                fix = "it is wider than the %s crop of this capture; use --aspect 16:9 or another frame" % j.aspect
         else:
             fix = _focus_fix(j) or "check --focus and --crop"
-        warnings.append("only %d%% of --subject-box is %s: %s." % (int(inside * 100), where, fix))
+        warnings.append("only %d%% of --subject-box is %s: %s."  # the same number as the 'subject box:' line
+                        % (round(100 * info["subject_box"]["inside"]), where, fix))
     # a solid backdrop shades nothing: a box reaching into the panel is out of view, warned about above
+    judged = None if solid or not (x1 > x0 and y1 > y0) else _shade_judged(rect, cv, j.band, j.anchor)
+    above = not solid and judged is not rect  # 9:16: only the rows above the caption area count (none: no shade)
+    if above:
+        vis, heavy = box_cover(judged, cv, vis_x, vis_y)[1:] if judged is not None else (1.0, 0.0)
     shade_bad = not solid and x1 > x0 and y1 > y0 and (vis < 0.7 or heavy > 0.2)
     overlap_bad = glyphs > 0.02 or under_type > 0.10
     if not (shade_bad or overlap_bad):
         return
     if solid:
-        shade_fix = overlap_fix = "shorten the text, or move the subject with --focus or --crop"
+        shade_fix = overlap_fix = "%s, or move the subject with --focus or --crop" % _shorten(j)
     elif cv.tall:
         flip = "top" if j.anchor == "bottom" else "bottom"
         m, here = (j.band_scores or {}).get(flip), (j.band_scores or {}).get(j.anchor)
@@ -2596,14 +2934,14 @@ def _check_subject_box(j):
         if clears or (m and here and m["score"] >= here["score"] + BAND_MARGIN):  # the other band does better
             shade_fix = overlap_fix = "use --band %s, which keeps %s, or another frame" % (
                 flip, "it clear" if clears else "more of it in view")
-        else:
-            shade_fix = "shorten the text, or --crop the capture so the subject sits away from the band"
-            overlap_fix = "shorten the text, or move the subject with --focus or --crop"
+        else:  # --focus only moves the crop sideways, and the band spans the width
+            shade_fix = overlap_fix = _tall_crop_fix(j) or "%s, or use another frame" % _shorten(j)
     else:
         shade_fix = overlap_fix = _wide_fix(j, shade_bad, overlap_bad)
     if shade_bad:
-        warnings.append("the type %s darkens --subject-box on %s (%d%% under heavy shade, %d%% visible): %s." % (
-            "band" if cv.tall else "shade", j.aspect, round(100 * heavy), round(100 * vis), shade_fix))
+        warnings.append("the type %s darkens --subject-box on %s (%d%% under heavy shade, %d%% visible%s): %s." % (
+            "band" if cv.tall else "shade", j.aspect, round(100 * heavy), round(100 * vis),
+            " above the caption area" if above else "", shade_fix))
     if overlap_bad:
         warnings.append("the type overlaps --subject-box on %s: %s." % (j.aspect, overlap_fix))
 
@@ -2686,7 +3024,7 @@ def _check_result(j):
             if j.backdrop == "solid":
                 hint = "use a darker --bg"
             elif cv.tall:
-                hint = "use --focus to move the crop, or a darker image"
+                hint = _tall_contrast_fix(j)
             elif narrow:
                 hint = "use --text-side %s or a darker --bg" % ("right" if text_side == "left" else "left")
             elif layout == "single":
@@ -2713,9 +3051,7 @@ def _check_result(j):
     for name, b in built["elements"] + built["label_elements"]:
         if name not in built["flagged"] and not inside(b, frame):
             warnings.append("the %s runs outside %s: shorten it." % (name, where))
-    if "inset_rect" in info and overlaps(bbox, info["inset_rect"]):
-        warnings.append("type overlaps the inset image: use --text-side, or a background with room beside the "
-                        "screen or frame.")
+    _check_inset(j)
     if built["mask"] is not None:
         glyphs = np.asarray(layer.getchannel("A")) > 128
         hit = (glyphs & (np.asarray(built["mask"]) > 128)).sum()
@@ -2726,7 +3062,8 @@ def _check_result(j):
         _check_post(j)
     else:
         if overlaps(bbox, cv.timestamp_zone):
-            warnings.append("type reaches the bottom-right corner, where YouTube's duration badge sits.")
+            warnings.append("type reaches the bottom-right corner, where YouTube's duration badge sits: %s."
+                            % _badge_fix(j))
         title_words = [] if logo is not None else split_lines(title)
         words = " ".join([kicker] + title_words + [subtitle, label] + list(panel_labels or []))
         n_words = len(words.replace("·", " ").split())
@@ -2787,6 +3124,7 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
             inset_box=inset_box, aspect=aspect, title_color=title_color, crop=crop, title_tracking=title_tracking,
             subject_box=subject_box, system_fonts=system_fonts, band_pos=band, mode=mode, body=body,
             details=details, backdrop=backdrop, info=info)
+    j.given = dict(locals())  # read by _rerun
     _check_args(j)
     _load_sources(j)
     _choose_layout(j)
