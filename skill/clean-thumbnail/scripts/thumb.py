@@ -33,11 +33,16 @@ from dataclasses import dataclass, field
 import io
 import json
 import os
+import tempfile
 import unicodedata
 import sys
 
 import numpy as np
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFile, ImageFilter, ImageFont, ImageOps
+try:
+    from PIL import ImageCms  # color management (littlecms); missing from some Pillow builds
+except ImportError:
+    ImageCms = None
 
 __version__ = "0.9.0"
 
@@ -76,7 +81,7 @@ POST_BIG_BASE, POST_BIG_MIN = 150, 80  # headline size cap and the size it shrin
 POST_IMAGE_SHARE = 0.45  # 4:5: the image keeps at least this share of the frame above the text band
 POST_COL_SHARE = 0.50  # 16:9: the type column's share of the width (thumbnails: COL_SHARE)
 CHANNEL_FILE = "clean-thumbnail.json"
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".avif", ".tif", ".tiff", ".bmp", ".gif", ".heic", ".heif")
 
 # First font found wins. "file@Instance" picks a named instance of a variable font; a bare short
 # name ("cinzel", "outfit@Bold") is one of the fonts bundled in ../fonts (see --list-fonts).
@@ -359,8 +364,10 @@ def dark_tone(img):
 
 def to_rgb(img, fill=None):
     """RGB copy of any input image: EXIF rotation applied, 16-bit and float modes rescaled
-    (Pillow would clip them), and transparency filled with a dark tone from the opaque part."""
-    img = ImageOps.exif_transpose(img)
+    (Pillow would clip them), colors converted to sRGB from an embedded ICC profile (see to_srgb), and
+    transparency filled with a dark tone from the opaque part."""
+    icc = img.info.get("icc_profile")
+    img = to_srgb(ImageOps.exif_transpose(img), icc)
     if img.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I", "F"):
         a = np.asarray(img, dtype=np.float64)
         top = float(a.max()) if a.size else 1.0
@@ -385,9 +392,32 @@ def to_rgb(img, fill=None):
     return img.convert("RGB")
 
 
+def to_srgb(img, icc=None):
+    """img with its colors converted from its ICC profile (icc, default the embedded one: Display P3 from a
+    phone, Adobe RGB from a camera, a CMYK press profile) to sRGB, which every output is read as. Without
+    this, wide-gamut photos come out dull and CMYK shifts color. RGB and RGBA stay in their mode, CMYK
+    becomes RGB; untagged images, profiles that already match sRGB (so their pixels stay exactly as they
+    are), other modes, unreadable profiles and Pillow builds without ImageCms come back unchanged."""
+    icc = img.info.get("icc_profile") if icc is None else icc
+    if not icc or ImageCms is None or img.mode not in ("RGB", "RGBA", "CMYK"):
+        return img
+    try:
+        prof, srgb = ImageCms.ImageCmsProfile(io.BytesIO(icc)), ImageCms.createProfile("sRGB")
+        if img.mode != "CMYK":
+            v = np.linspace(0, 255, 7).astype(np.uint8)  # a 7x7x7 color cube: an sRGB profile maps it to itself
+            cube = Image.fromarray(np.stack(np.meshgrid(v, v, v), -1).reshape(7, 49, 3), "RGB")
+            moved = ImageCms.profileToProfile(cube, prof, srgb, outputMode="RGB")
+            if np.abs(np.asarray(moved, np.int16) - np.asarray(cube, np.int16)).max() <= 1:
+                return img
+        return ImageCms.profileToProfile(img, prof, srgb, outputMode="RGBA" if img.mode == "RGBA" else "RGB")
+    except (ImageCms.PyCMSError, OSError, ValueError, TypeError):
+        return img
+
+
 # Content shapes that letterbox and pillarbox bars leave behind (width / height).
 COMMON_RATIOS = (2.76, 2.40, 2.39, 2.35, 2.33, 2.2, 2.0, 1.9, 1.85, 16 / 9, 1.66, 1.6, 1.5, 1.43, 4 / 3,
                  1.25, 1.0, 0.8, 0.75, 9 / 16, 0.5, 9 / 19.5, 9 / 20)
+TRIM_MAX_PIXELS = 40000000  # trim_box measures larger images (200 MP phone photos) on a reduced copy
 
 
 def trim_bars(img):
@@ -401,34 +431,53 @@ def trim_box(img, pristine_only=False):
     pristine_only (inside a --crop) accepts only clean, even bars: a dark stage there is content.
 
     A bar is a run of lines from an edge that are dark-dominated (median at most 28, 60% of
-    pixels near it) and mostly flat at one constant level, so video black (16), dark-theme gray
-    and bars carrying subtitles or a watermark all count, while a night sky (gradients, stars)
-    does not. Bars are trimmed only in pairs on opposite edges at a similar level, and only when
-    the bars are pristine or what remains has a standard shape (2.39, 16:9, 4:3, 1:1, 9:16...)."""
-    a = np.asarray(img.convert("L"), dtype=np.float32)
+    pixels near it), ending at its innermost flat line, at one constant level, so video black (16),
+    dark-theme gray and bars carrying subtitles (one line or two) or a watermark all count, while a
+    night sky (gradients, stars) does not. Bars are trimmed only in pairs on opposite edges at a
+    similar level, and only when the bars are pristine or what remains has a standard shape (2.39,
+    16:9, 4:3, 1:1, 9:16...). Flat dark lines past 40% of the image from an edge are a dark field
+    around sparse content (a logo or a product photo on black), not a bar: nothing is trimmed on
+    that axis, and the other axis needs a standard shape, so the content is never cut into.
+    Images over TRIM_MAX_PIXELS are measured on a reduced copy (memory), within a few pixels."""
+    g = img.convert("L")
+    if g.width * g.height > TRIM_MAX_PIXELS:  # to at most half the limit, so the reduced copy is measured as is
+        f = int(np.ceil(np.sqrt(g.width * g.height / (TRIM_MAX_PIXELS / 2.0))))
+        box = trim_box(g.reduce(f), pristine_only)
+        return (box[0] * f, box[1] * f, min(img.width, box[2] * f), min(img.height, box[3] * f))
+    a = np.asarray(g, dtype=np.float32)
     h, w = a.shape
+    sparse = []  # axes ("rows", "cols") whose dark lines run past the cap
 
     def stats(lines):
         med = np.median(lines, axis=1)
         return med, (np.abs(lines - med[:, None]) <= 10).mean(axis=1), lines.std(axis=1)
 
-    def edge_run(med, dom, std, reverse):
-        n = 0
+    def edge_run(med, dom, std, reverse, axis):
+        n = last = 0  # dark-dominated lines from the edge; lines up to the innermost flat one
         for i in (range(len(med) - 1, -1, -1) if reverse else range(len(med))):
             if med[i] <= 28 and dom[i] >= 0.6:
                 n += 1
+                last = n if std[i] <= 3 else last
             else:
                 break
-        if n < 2:
+        if last > 0.4 * len(med):
+            sparse.append(axis)
+            return None
+        if last < 2:
             return None
         sel = slice(len(med) - n, len(med)) if reverse else slice(0, n)
         flat = std[sel] <= 3
-        if flat.mean() < 0.6:
+        if flat.mean() < 0.25:  # subtitle lines may fill most of a bar
             return None
         levels = med[sel][flat]
         spread = float(np.percentile(levels, 90) - np.percentile(levels, 10))
         if spread > 4:
             return None
+        # textured dark lines between the flat bar and the picture are picture (a dark scene, or arms
+        # reaching into a dark stage): kept, and the flat share counts them, so the bar is not pristine.
+        # A few lines of JPEG ringing or a soft edge next to the picture still belong to the bar.
+        if n - last > max(2, 0.01 * len(med)):
+            n = last
         return n, float(np.median(levels)), float(flat.mean()), spread
 
     def pristine(r1, r2):
@@ -439,29 +488,39 @@ def trim_box(img, pristine_only=False):
         return ch > 0 and any(abs(cw / ch / r - 1) <= 0.025 for r in COMMON_RATIOS)
 
     rows, cols = stats(a), stats(a.T)
-    rt, rb = edge_run(*rows, False), edge_run(*rows, True)
-    cl, cr = edge_run(*cols, False), edge_run(*cols, True)
+    rt, rb = edge_run(*rows, False, "rows"), edge_run(*rows, True, "rows")
+    cl, cr = edge_run(*cols, False, "cols"), edge_run(*cols, True, "cols")
     top = bottom = left = right = 0
-    if rt and rb and abs(rt[1] - rb[1]) <= 6:
-        top, bottom = min(rt[0], int(h * 0.4)), min(rb[0], int(h * 0.4))
-    if cl and cr and abs(cl[1] - cr[1]) <= 6:
-        left, right = min(cl[0], int(w * 0.4)), min(cr[0], int(w * 0.4))
+    if rt and rb and abs(rt[1] - rb[1]) <= 6 and "rows" not in sparse:
+        top, bottom = rt[0], rb[0]
+    if cl and cr and abs(cl[1] - cr[1]) <= 6 and "cols" not in sparse:
+        left, right = cl[0], cr[0]
     cw, ch = w - left - right, h - top - bottom
-    if top and not (pristine(rt, rb) or (not pristine_only and (common(cw, ch) or common(w, ch)))):
+    # clean bars leave any shape, unless the other axis is a dark field: a logo plate is no letterbox
+    if top and not ((pristine(rt, rb) and "cols" not in sparse)
+                    or (not pristine_only and (common(cw, ch) or common(w, ch)))):
         top = bottom = 0
-    if left and not (pristine(cl, cr) or (not pristine_only and (common(cw, h - top - bottom) or common(cw, h)))):
+    if left and not ((pristine(cl, cr) and "rows" not in sparse)
+                     or (not pristine_only and (common(cw, h - top - bottom) or common(cw, h)))):
         left = right = 0
     if not (top or bottom or left or right) or top + bottom >= h - 8 or left + right >= w - 8:
         return (0, 0, w, h)
     return (left, top, w - right, h - bottom)
 
 
-def background_box(src, crop=None, trimmed=None):
+def background_box(src, crop=None, trimmed=None, trim=True):
     """The pixel box (left, top, right, bottom) of the capture that the thumbnail keeps: bars
     trimmed, then --crop (fractions of the image as given, so bars go whether or not the crop
     includes them), then clean bars inside the crop (a video player inside a screenshot).
-    trimmed: trim_box(src) when the caller already has it."""
+    trimmed: trim_box(src) when the caller already has it. trim=False (--no-trim), or a crop of
+    the whole frame (--crop 0,0,1,1), keeps exactly the crop: no bars are trimmed."""
     w, h = src.size
+    if not trim or (crop is not None and tuple(crop) == (0, 0, 1, 1)):
+        c = crop or (0, 0, 1, 1)
+        box = tuple(int(round(v)) for v in (c[0] * w, c[1] * h, c[2] * w, c[3] * h))
+        if box[2] - box[0] < 16 or box[3] - box[1] < 16:
+            raise ValueError("--crop leaves almost nothing of the image: widen it")
+        return box
     box = trim_box(src) if trimmed is None else tuple(trimmed)
     if crop is not None:
         c = (crop[0] * w, crop[1] * h, crop[2] * w, crop[3] * h)
@@ -484,11 +543,11 @@ def remap_box(region, size, kept):
             (region[2] * w - kept[0]) / bw, (region[3] * h - kept[1]) / bh)
 
 
-def prepare_background(src, crop=None, inset_box=None):
+def prepare_background(src, crop=None, inset_box=None, trim=True):
     """Trim bars, then apply --crop (see background_box). Returns (image, inset_box remapped
     to fractions of the returned image, crop box in pixels or None)."""
     w, h = src.size
-    box = background_box(src, crop)
+    box = background_box(src, crop, trim=trim)
     inset_box = remap_box(inset_box, (w, h), box)
     out = src if box == (0, 0, w, h) else src.crop(box)
     return out, inset_box, (box if crop is not None else None)
@@ -687,10 +746,12 @@ def color_flag(name):
 
 
 def cut_out(img):
-    """Use the image's own transparency; otherwise remove the background with rembg if installed."""
+    """Use the image's own transparency; otherwise remove the background with rembg if installed.
+    Colors are converted to sRGB from an embedded ICC profile (an iPhone cut-out is Display P3)."""
+    icc = img.info.get("icc_profile")
     img = ImageOps.exif_transpose(img)
     if img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info:
-        rgba = img.convert("RGBA")
+        rgba = to_srgb(img.convert("RGBA"), icc)
         if np.asarray(rgba.getchannel("A")).min() < 250:
             return rgba
     try:
@@ -708,6 +769,21 @@ def is_narrow(src, w, h, cropped=False):
     cover-cropped. A capture must be clearly narrower (under 90% of the canvas shape); a --crop
     is taken as asked, so anything visibly narrower than the canvas counts."""
     return h <= w and src.width / src.height < (w / h) * (0.99 if cropped else 0.9)
+
+
+NARROW_MIN_SHARE = 0.25  # narrow art under this share of the frame's width is a sliver beside flat --bg
+
+
+def _check_narrow(j):
+    """Warn when narrow art fills only a sliver of the frame (a 300 px wide strip on a 16:9 canvas): the
+    scale and contrast checks pass, yet the picture is almost all flat background."""
+    if not j.narrow or j.backdrop == "solid":
+        return
+    share = j.src.width * j.cv.h / j.src.height / j.cv.w
+    if share < NARROW_MIN_SHARE:
+        j.info["warnings"].append("the art fills only %d%% of the frame's width and the rest is flat background: "
+                                  "%s." % (round(100 * share), "widen --crop" if j.cropped
+                                           else "render art this tall as --aspect 9:16"))
 
 
 def required_scale(src, w, h, layout="single", n_panels=1, cropped=False):
@@ -1712,6 +1788,7 @@ class Job:
     image_rect: tuple = None
     # set by _compose
     built: dict = None
+    trim: bool = True  # --no-trim: False keeps the capture and panels whole (no bar trimming)
 
 
 def _check_args(j):
@@ -1770,7 +1847,14 @@ def _check_args(j):
 def _load_sources(j):
     """Decode the images, crop the capture and pick the canvas size."""
     panels, subjects, src, crop, inset_box, info = j.panels, j.subjects, j.src, j.crop, j.inset_box, j.info
-    panels = [trim_bars(to_rgb(p)) for p in (panels or [])]
+    panels = [to_rgb(p) for p in (panels or [])]
+    if j.trim:
+        for i, p in enumerate(panels):
+            box = trim_box(p)
+            if box != (0, 0) + p.size:
+                panels[i] = p.crop(box)
+                info["notes"].append("trimmed the bars of panel %d: kept x %d-%d, y %d-%d of %dx%d (--no-trim keeps "
+                                     "it whole)" % (i + 1, box[0], box[2], box[1], box[3], p.width, p.height))
     subjects = [cut_out(s) for s in (subjects or [])]
     for i, s in enumerate(subjects):
         if crop_to_alpha(s) is None:
@@ -1782,14 +1866,20 @@ def _load_sources(j):
         src = to_rgb(src)
         given = src.size
         j.src_given = src  # the capture as given, for --crop advice
-        kept = background_box(src, crop)  # trim_box is the costly part: once for the inset and the subject box
+        kept = background_box(src, crop, trim=j.trim)  # trim_box is the costly part: once for the inset and the subject box
         inset_box = remap_box(inset_box, given, kept)
         crop_px = kept if crop is not None else None
         _keep_subject_box(j, given, kept)
         src = src if kept == (0, 0) + tuple(given) else src.crop(kept)
+        asked = background_box(j.src_given, crop, trim=False)  # the crop alone, no bars
         if crop_px is not None:
             info["notes"].append("cropped the capture to x %d-%d, y %d-%d of %dx%d"
                                  % (crop_px[0], crop_px[2], crop_px[1], crop_px[3], given[0], given[1]))
+        if kept != asked:  # say so: a dark frame around a subject can pass for bars
+            info["notes"].append("trimmed black bars: kept x %d-%d, y %d-%d of %dx%d (%s)"
+                                 % (kept[0], kept[2], kept[1], kept[3], given[0], given[1],
+                                    "--no-trim keeps the crop as given" if crop is not None
+                                    else "--no-trim keeps the whole frame"))
     backgrounds = panels or [src]
     info["source"] = backgrounds[0].size
     cropped = layout == "single" and crop_px is not None
@@ -1960,7 +2050,7 @@ def _pick_color(value, what, image, bg, notes):
 def _prepare_logo(logo, logo_white):
     """Orient, check and trim the logo; recolor it white on request."""
     if logo is not None:
-        logo = ImageOps.exif_transpose(logo).convert("RGBA")
+        logo = to_srgb(ImageOps.exif_transpose(logo).convert("RGBA"), logo.info.get("icc_profile"))
         if np.asarray(logo.getchannel("A")).min() >= 250:
             raise ValueError("--logo needs a transparent background (a PNG with alpha); this one is opaque")
         logo = crop_to_alpha(logo)
@@ -2441,13 +2531,13 @@ def _crop_advice(j, sides, keep):
     """suggest_crop for this capture: the bars of the whole capture (the re-run trims them whatever the
     crop), the height the re-run keeps, and each hit confirmed against background_box."""
     W, H = j.given_size
-    tb = trim_box(j.src_given)
+    tb = trim_box(j.src_given) if j.trim else (0, 0, W, H)
     y = (j.crop[1], j.crop[3]) if j.crop is not None else (0.0, 1.0)
     kept_h = int(round(min(tb[3], y[1] * H))) - int(round(max(tb[1], y[0] * H)))
 
     def exact(crop):
         try:
-            return background_box(j.src_given, crop, tb)
+            return background_box(j.src_given, crop, tb, j.trim)
         except ValueError:
             return None
     return suggest_crop(j.subject_box_given, j.given_size, j.cv, sides, j.feather, j.shade, bars=(tb[0], tb[2]),
@@ -2732,6 +2822,7 @@ def _check_result(j):
         n_words = len(words.replace("·", " ").split())
         if n_words > 8:
             warnings.append("%d words of type; keep it to 8 or fewer so it reads at sidebar size." % n_words)
+    _check_narrow(j)
     _check_subject_box(j)
     info["warnings"] = list(dict.fromkeys(warnings))  # drop exact repeats, keep order
 
@@ -2741,7 +2832,7 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
            title_font=None, label_font=None, logo=None, logo_white=False, size="auto",
            panels=None, panel_labels=None, subjects=None, push=None, inset=None, inset_box=None,
            aspect=None, title_color="white", crop=None, title_tracking=None, subject_box=None,
-           system_fonts=False, band="auto", mode="thumbnail", body="", details="", backdrop="fade"):
+           system_fonts=False, band="auto", mode="thumbnail", body="", details="", backdrop="fade", trim=True):
     """Return (thumbnail at master size, info dict with warnings and measurements).
 
     backdrop is what sits behind the type: "fade" (default) runs the photo under it, shaded toward the type;
@@ -2774,7 +2865,8 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
     The default fonts are bundled, so the type is the same on every machine; system_fonts=True tries the
     installed faces first (Bodoni MT, Bahnschrift, Didot...), as up to v0.7.0. title_font and label_font
     always win. band ("auto", "top", "bottom") sets where the type band goes on 4:5 and 9:16 (a single
-    capture without a cut-out); auto keeps it at the bottom unless the top keeps subject_box clearly more in view."""
+    capture without a cut-out); auto keeps it at the bottom unless the top keeps subject_box clearly more in view.
+    trim=False keeps the capture and the panels whole: no letterbox or pillarbox bars are trimmed."""
     if aspect is None:
         aspect = "4:5" if mode == "post" else "16:9"
     info = {"warnings": [], "notes": [], "lead": lead, "aspect": aspect}
@@ -2787,6 +2879,7 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
             inset_box=inset_box, aspect=aspect, title_color=title_color, crop=crop, title_tracking=title_tracking,
             subject_box=subject_box, system_fonts=system_fonts, band_pos=band, mode=mode, body=body,
             details=details, backdrop=backdrop, info=info)
+    j.trim = trim
     _check_args(j)
     _load_sources(j)
     _choose_layout(j)
@@ -2909,7 +3002,7 @@ def preview_sheet(thumb):
     return sheet
 
 
-OUTPUT_SUFFIXES = ("_preview.png", "_feed.png", "_phone.jpg", "_1080.jpg")
+OUTPUT_SUFFIXES = ("_preview.png", "_feed.png", "_phone.jpg", "_1080.jpg", "_1280.jpg")
 
 
 def feed_grid(thumbs, folder, cols=4, tw=320, exclude=()):
@@ -2980,9 +3073,32 @@ def save_jpeg(img, path, max_bytes=PHONE_MAX_BYTES):
         if buf.tell() <= max_bytes or q <= 60:
             break
         q -= 4
-    with open(path, "wb") as f:
-        f.write(buf.getvalue())
+    write_file(path, buf.getvalue())
     return q, buf.tell()
+
+
+def write_file(path, data):
+    """Write bytes through a temporary file next to path, then os.replace: an interrupted run never leaves
+    a half-written file, and a path that is another name for an input (a hard link) gets a new file
+    instead of overwriting that input's data."""
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def save_png(img, path):
+    """img as a PNG at path, through write_file."""
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    write_file(path, buf.getvalue())
 
 
 def _themes():
@@ -2992,10 +3108,12 @@ def _themes():
 
 
 def feed_preview(thumb):
-    """4:5 in a Facebook-style feed card (desktop 500 px, phone 360 px) in dark and light, plus a squint."""
+    """4:5 (or a 16:9 post) in a Facebook-style feed card (desktop 500 px, phone 360 px) in dark and light,
+    plus a squint."""
+    ratio = thumb.height / thumb.width  # 1.25 for 4:5
     widths = [(500, "desktop feed"), (360, "phone feed")]
     pad, gap = 28, 28
-    card_h = lambda w: 56 + int(w * 1.25) + 44  # noqa: E731
+    card_h = lambda w: 56 + int(w * ratio) + 44  # noqa: E731
     width = pad * 2 + sum(w for w, _ in widths) + 360 + gap * len(widths)
     row_h = card_h(500) + 44
     sheet = Image.new("RGB", (width, row_h * 2), (255, 255, 255))
@@ -3005,7 +3123,7 @@ def feed_preview(thumb):
         d.rectangle((0, y0, width, y0 + row_h), fill=page)
         x = pad
         for w, name in widths:
-            h = int(w * 1.25)
+            h = int(w * ratio)
             d.rounded_rectangle((x, y0 + pad // 2, x + w, y0 + pad // 2 + card_h(w)), radius=10, fill=card)
             d.ellipse((x + 12, y0 + pad // 2 + 12, x + 44, y0 + pad // 2 + 44), fill=bars)
             d.rounded_rectangle((x + 54, y0 + pad // 2 + 16, x + 54 + w // 3, y0 + pad // 2 + 26), radius=5, fill=bars)
@@ -3017,9 +3135,9 @@ def feed_preview(thumb):
                                     fill=bars)
             preview_text(sheet, x, y0 + pad // 2 + card_h(w) + 20, "%d px  %s" % (w, name), 13, fg)
             x += w + gap
-        sq = squint(thumb.resize((360, 450), Image.LANCZOS))
+        sq = squint(thumb.resize((360, int(360 * ratio)), Image.LANCZOS))
         sheet.paste(sq, (x, y0 + pad // 2 + 56))
-        preview_text(sheet, x, y0 + pad // 2 + 56 + 450 + 20, "360 px  squint test", 13, fg)
+        preview_text(sheet, x, y0 + pad // 2 + 56 + int(360 * ratio) + 20, "360 px  squint test", 13, fg)
     return sheet
 
 
@@ -3064,31 +3182,40 @@ def reels_preview(thumb):
     return sheet
 
 
-def export_paths(stem, aspect="16:9"):
+def copy_suffix(aspect="16:9", mode="thumbnail"):
+    """The standard-size copy's suffix: _phone.jpg for a 16:9 thumbnail (YouTube's phone upload), _1280.jpg
+    for a 16:9 post, _1080.jpg for 4:5 and 9:16."""
+    if aspect != "16:9":
+        return "_1080.jpg"
+    return "_1280.jpg" if mode == "post" else "_phone.jpg"
+
+
+def export_paths(stem, aspect="16:9", mode="thumbnail"):
     """The files export() writes for one variant: master, copy (when written), preview."""
-    return [stem + ".jpg", stem + ("_phone.jpg" if aspect == "16:9" else "_1080.jpg"), stem + "_preview.png"]
+    return [stem + ".jpg", stem + copy_suffix(aspect, mode), stem + "_preview.png"]
 
 
-def export(thumb, stem, aspect="16:9"):
+def export(thumb, stem, aspect="16:9", mode="thumbnail"):
     """Master (largest size, desktop upload), the standard-size copy, and the preview sheet.
 
-    16:9: phone copy at 1280x720 under 2 MB (key "phone"). 4:5 and 9:16: a 1080-wide copy when the
-    master is larger. Creates the output folder. Returns paths and sizes under "master", "copy"
-    and "preview"."""
+    16:9: a 1280x720 copy under 2 MB (key "phone" for a thumbnail; a post's copy is _1280.jpg, and its
+    preview is a feed card, not YouTube tiles with a duration badge). 4:5 and 9:16: a 1080-wide copy
+    when the master is larger. Creates the output folder; every file is written through a temporary
+    file (write_file). Returns paths and sizes under "master", "copy" and "preview"."""
     folder = os.path.dirname(os.path.abspath(stem))
     os.makedirs(folder, exist_ok=True)
     mq, msize = save_jpeg(thumb, stem + ".jpg", MASTER_MAX_BYTES)
     files = {"master": (stem + ".jpg", thumb.size, mq, msize)}
     copy_size = ASPECTS[aspect]["copy"]
     if aspect == "16:9" or thumb.size != copy_size:
-        name = stem + ("_phone.jpg" if aspect == "16:9" else "_1080.jpg")
+        name = stem + copy_suffix(aspect, mode)
         small = thumb if thumb.size == copy_size else thumb.resize(copy_size, Image.LANCZOS)
         q, size = save_jpeg(small, name, PHONE_MAX_BYTES)
         files["copy"] = (name, copy_size, q, size)
-        if aspect == "16:9":
+        if aspect == "16:9" and mode != "post":
             files["phone"] = files["copy"]
-    sheet = {"16:9": preview_sheet, "4:5": feed_preview, "9:16": reels_preview}[aspect](thumb)
-    sheet.save(stem + "_preview.png")
+    previews = {"16:9": feed_preview if mode == "post" else preview_sheet, "4:5": feed_preview, "9:16": reels_preview}
+    save_png(previews[aspect](thumb), stem + "_preview.png")
     files["preview"] = stem + "_preview.png"
     return files
 
@@ -3208,7 +3335,81 @@ def output_stem(output, first):
     if output.endswith(("/", "\\")) or os.path.isdir(output):
         return os.path.join(output, default)
     root, ext = os.path.splitext(output)
-    return root if ext.lower() in IMAGE_EXTS else output
+    return root if ext.lower() in IMAGE_EXTS else output  # the outputs are always .jpg (and .png previews)
+
+
+MAX_INPUT_PIXELS = 400000000  # a 200 MP phone photo opens; Pillow's own limit (179 MP) guards untrusted files
+
+
+def unreadable_kind(head):
+    """The format of an image Pillow could not open, from its first bytes, when it is one with a known
+    way out: "JPEG XR" (HDR captures), "HEIF" (HEIC phone photos) or "AVIF"; else None."""
+    if head[:3] == b"II\xbc":
+        return "JPEG XR"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"avif", b"avis"):
+            return "AVIF"
+        if brand in (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"):
+            return "HEIF"
+    return None
+
+
+def read_image(path):
+    """Open and decode one of the user's own images. Pillow's decompression-bomb limit is lifted up to
+    MAX_INPUT_PIXELS; HEIC opens when pillow-heif is installed. Raises ValueError with a message that
+    names the fix for a format Pillow can't read (JPEG XR HDR captures, HEIC) or an image over the limit."""
+    with open(path, "rb") as f:
+        head = f.read(16)
+    kind = unreadable_kind(head)
+    if kind == "HEIF":
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except ImportError:
+            pass
+    old, img = Image.MAX_IMAGE_PIXELS, None
+    Image.MAX_IMAGE_PIXELS = None  # checked below, against the larger limit
+    try:
+        img = Image.open(path)
+        if img.width * img.height > MAX_INPUT_PIXELS:
+            size = img.size
+            img.close()
+            raise ValueError("is %dx%d (%d MP), more than the %d MP this script reads: downscale it to 8K or "
+                             "less first" % (size[0], size[1], size[0] * size[1] // 10 ** 6,
+                                             MAX_INPUT_PIXELS // 10 ** 6))
+        img.load()
+        return img
+    except (OSError, SyntaxError) as e:
+        if img is not None:
+            img.close()
+        if kind == "JPEG XR":
+            named = os.path.splitext(path)[1].lower() in (".jxr", ".wdp", ".hdp")
+            raise ValueError("is a JPEG XR HDR capture%s, which this script can't read: the NVIDIA app and Xbox "
+                             "Game Bar save these when HDR is on. Export it as an SDR PNG or JPEG first, or turn "
+                             "HDR off before capturing so they save SDR files"
+                             % ("" if named else " (despite its %s name)" % os.path.splitext(path)[1]))
+        if kind == "HEIF":
+            raise ValueError("is a HEIC/HEIF photo, which this Pillow can't read: install pillow-heif "
+                             "(python -m pip install pillow-heif) or export it as JPEG")
+        if kind == "AVIF":
+            raise ValueError("is an AVIF image, which this Pillow can't read: update Pillow "
+                             "(python -m pip install -U pillow) or export it as JPEG")
+        raise ValueError("is not a readable image (%s)" % e)
+    finally:
+        Image.MAX_IMAGE_PIXELS = old
+
+
+def file_id(path):
+    """What makes two paths the same file: (device, inode) when it exists, so a hard link, an 8.3 short
+    name, a junction or a symlink of an input is caught; else the resolved, case-folded path."""
+    try:
+        st = os.stat(path)
+        if st.st_ino:
+            return (st.st_dev, st.st_ino)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.realpath(path))
 
 
 def main(argv=None):
@@ -3262,19 +3463,28 @@ def main(argv=None):
     ap.add_argument("--label-font", help="bundled font name or font file for the label box; optional @Weight")
     ap.add_argument("--logo", help="transparent PNG of the game or brand logo; replaces the title text")
     ap.add_argument("--logo-white", action="store_true", default=None, help="recolor the logo white")
+    ap.add_argument("--no-logo-white", dest="logo_white", action="store_false", default=None,
+                    help="keep the logo's own colors, whatever the channel file says")
     ap.add_argument("--system-fonts", action="store_true", default=None,
                     help="default title and label fonts from this machine (Bodoni MT, Bahnschrift, Didot...) "
                     "instead of the bundled Playfair and Outfit; the type then differs between machines")
+    ap.add_argument("--no-system-fonts", dest="system_fonts", action="store_false", default=None,
+                    help="the bundled fonts, whatever the channel file says")
+    ap.add_argument("--no-trim", action="store_true", help="keep the capture and panels whole: don't trim black "
+                    "letterbox or pillarbox bars (a logo or product on a black field can pass for bars)")
     ap.add_argument("--size", help="16:9 master size: auto (largest without upscaling), 720p, 1080p, 1440p, 4k")
     ap.add_argument("--channel", help="channel settings JSON (default: ./%s if present)" % CHANNEL_FILE)
     ap.add_argument("--feed", help="folder of other thumbnails to test yours against")
     ap.add_argument("-o", "--output", help="output stem, .jpg name, or folder (default: <capture>_thumb)")
     ap.add_argument("--list-fonts", action="store_true", help="list the bundled title fonts and exit")
     args = ap.parse_args(argv)
-    for stream in (sys.stdout, sys.stderr):  # a cp1252 console must never abort a run over one character
-        try:
-            stream.reconfigure(errors="backslashreplace")
-        except (AttributeError, ValueError):
+    for stream in (sys.stdout, sys.stderr):  # a cp1252 console must never abort a run over one character,
+        try:  # and piped output (an agent reading it) is UTF-8, so the file names it prints are real ones
+            if stream.isatty() or os.environ.get("PYTHONIOENCODING"):
+                stream.reconfigure(errors="backslashreplace")
+            else:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
             pass
     if args.list_fonts:
         cat = font_catalog()
@@ -3315,29 +3525,39 @@ def main(argv=None):
     aspects = (s["aspect"] if not post or args.aspect is not None else "4:5").split(",")
     stem = output_stem(args.output, first)
 
-    def norm(p):
-        return os.path.normcase(os.path.abspath(p))
-
     plan = []  # (aspect, lead, file stem)
     for aspect in aspects:
         for lead in leads:
             tag = ("" if len(leads) == 1 else ("_A" if lead == "title" else "_B")) + ASPECTS[aspect]["suffix"]
             plan.append((aspect, lead, stem + tag))
-    outputs = [p for a, _, st in plan for p in export_paths(st, a)] + [stem + "_feed.png"]
+    outputs = [p for a, _, st in plan for p in export_paths(st, a, s["mode"])] + [stem + "_feed.png"]
     inputs = [args.capture, args.inset, s["logo"], channel_path] + list(args.panel or []) + list(args.subject or [])
-    clash = sorted({norm(p) for p in outputs} & {norm(p) for p in inputs if p})
+    ids = {file_id(p) for p in inputs if p}  # by identity: a hard link or short name of an input is that input
+    clash = [p for p in outputs if file_id(p) in ids]
     if clash:
         ap.error("output would overwrite an input file: %s; choose another -o" % clash[0])
+    # check -o before the render, not after it
+    folder = os.path.dirname(os.path.abspath(stem))
+    taken = [p for p in outputs if os.path.isdir(p)]
+    if taken:
+        ap.error("can't write %s: a folder has that name; choose another -o" % taken[0])
+    try:
+        os.makedirs(folder, exist_ok=True)
+        fd, probe = tempfile.mkstemp(suffix=".tmp", dir=folder)
+        os.close(fd)
+        os.remove(probe)
+    except OSError as e:
+        ap.error("can't write to %s (%s); choose another -o" % (folder, e.strerror or e))
 
     def open_image(path, what):
         if not os.path.isfile(path):
             ap.error("%s not found: %s" % (what, path))
         try:
-            img = Image.open(path)
-            img.load()
-            return img
-        except (OSError, ValueError, Image.DecompressionBombError) as e:
-            ap.error("%s is not a readable image: %s (%s)" % (what, path, e))
+            return read_image(path)
+        except ValueError as e:
+            ap.error("%s %s %s" % (what, path, e))
+        except OSError as e:
+            ap.error("%s %s can't be read (%s)" % (what, path, e.strerror or e))
 
     try:
         common = dict(title=args.title, label=args.label, kicker=s["kicker"] or "", subtitle=args.subtitle,
@@ -3352,7 +3572,7 @@ def main(argv=None):
                       subjects=[cut_out(open_image(p, "subject")) for p in args.subject or []] or None,
                       push=s["push"], inset=open_image(args.inset, "inset") if args.inset else None,
                       inset_box=args.inset_box, crop=args.crop, subject_box=args.subject_box, mode=s["mode"],
-                      body=args.body, details=args.details, backdrop=s["backdrop"])
+                      body=args.body, details=args.details, backdrop=s["backdrop"], trim=not args.no_trim)
         src = open_image(args.capture, "capture") if args.capture else None
     except ValueError as e:
         ap.error(str(e))
@@ -3375,7 +3595,10 @@ def main(argv=None):
             thumb, info = render(src, lead=lead, aspect=aspect, **common)
         except ValueError as e:
             ap.error(str(e))
-        files = export(thumb, file_stem, aspect)
+        try:
+            files = export(thumb, file_stem, aspect, s["mode"])
+        except OSError as e:
+            ap.error("can't write %s (%s); choose another -o" % (e.filename or file_stem, e.strerror or e))
         written += [f[0] if isinstance(f, tuple) else f for f in files.values()]
         if aspect == "16:9":
             thumbs.append(thumb)
@@ -3422,7 +3645,10 @@ def main(argv=None):
             print("warning: --feed compares 16:9 thumbnails; add 16:9 to --aspect to get a feed grid.")
         else:
             grid = feed_grid(thumbs, args.feed, exclude=written + [p for p in inputs if p])
-            grid.save(stem + "_feed.png")
+            try:
+                save_png(grid, stem + "_feed.png")
+            except OSError as e:
+                ap.error("can't write %s (%s); choose another -o" % (stem + "_feed.png", e.strerror or e))
             print("wrote %s_feed.png (%d other thumbnails)" % (stem, grid.info["competitors"]))
             if grid.info["competitors"] == 0:
                 print("warning: no other thumbnails were loaded from %s." % args.feed)
