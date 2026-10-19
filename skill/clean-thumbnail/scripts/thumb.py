@@ -60,8 +60,19 @@ BANDS = ("auto", "top", "bottom")  # --band: where the type band goes on 4:5 and
 BACKDROPS = ("fade", "solid")
 SOLID_IDLE_NOTE = "with --backdrop solid, --shade and --feather have no effect"
 COL_SHARE = 0.40  # type column width as a share of the canvas
-MAX_LUMA_BEHIND_TYPE = 0.45  # white type over sRGB 0.45 is about 4.5:1 contrast
 MIN_CONTRAST = 4.5  # WCAG AA for normal text, applied to every element
+# --shade not given (auto): the lightest shade from SHADE_MIN to SHADE_MAX, in 0.01 steps, that gives every element
+# SHADE_TARGET (WCAG AAA: a margin over MIN_CONTRAST for JPEG, phone scaling and glare), or what SHADE_MAX gives it
+# when that is less, so it is never below the fixed shade's contrast. On 16:9 its full strength then holds across
+# SHADE_HOLD of the type block (its last letters sit where the fade starts, and are measured there) and fades out
+# over SHADE_FALLOFF of the width (column_alpha). A number for --shade fixes it, with the fixed geometry.
+SHADE_MIN, SHADE_MAX, SHADE_TARGET = 0.35, 0.88, 7.0
+SHADE_HOLD, SHADE_FALLOFF = 0.85, 0.20
+# YouTube's dark-theme page (#0f0f0f). A flat fill (the slab beside narrow art, the solid panel, the color a full
+# shade turns into) taken from the image never sits darker than EDGE_CONTRAST against it. Under ~1.1:1 (EDGE_MERGE)
+# a near-black edge disappears into that page; 1.2:1 (L* 13 against the page's 4, #222222 for a gray) keeps the
+# thumbnail's outline with room for dim screens and JPEG, and white type still has 16:1 on it.
+DARK_PAGE, EDGE_CONTRAST, EDGE_MERGE = (15, 15, 15), 1.2, 1.1
 # --mode post: a standalone feed post whose image text is the message (no video title beside it), so the
 # script keeps every word of --body and --details and checks they read at the size a phone shows the post.
 MODES = ("thumbnail", "post")
@@ -122,6 +133,7 @@ class Canvas:
     """Output geometry. Lengths are designed at 1280x720 (wide) or 1080 px wide (tall)
     and scaled by `u`."""
     col_share = COL_SHARE  # 16:9 type column share of the width; posts set POST_COL_SHARE
+    shade_reach = None  # auto shade: px from the type side's edge where the column shade starts to fade (_auto_shade)
 
     def __init__(self, w, h):
         self.w, self.h = int(w), int(h)
@@ -353,8 +365,34 @@ def dark_tone_pixels(pixels):
 
 
 def dark_tone(img):
-    """Background color from the image's own shadows."""
-    return dark_tone_pixels(np.asarray(img.convert("RGB").resize((128, 128))))
+    """Background color from the image's own shadows, lifted to the dark-page floor (dark_tone_floor)."""
+    return dark_tone_floor(dark_tone_pixels(np.asarray(img.convert("RGB").resize((128, 128)))))
+
+
+def page_contrast(color):
+    """WCAG contrast of a color against YouTube's dark-theme page (DARK_PAGE)."""
+    lc, lp = (float(wcag_luminance(np.array(c[:3], dtype=np.float32) / 255.0)) for c in (color, DARK_PAGE))
+    return (max(lc, lp) + 0.05) / (min(lc, lp) + 0.05)
+
+
+def dark_tone_floor(color):
+    """A color darker than EDGE_CONTRAST off the dark page, lifted by the same amount in every channel until it
+    stands that far off, so the shadow tone keeps its hue and its (small) chroma instead of turning into a brighter,
+    more colorful brown or navy; any other color as it is."""
+    c = np.array(color[:3], dtype=np.float64)
+    lp = float(wcag_luminance(np.array(DARK_PAGE, dtype=np.float32) / 255.0))
+    want = EDGE_CONTRAST * (lp + 0.05) - 0.05  # luminance of the floor, on the light side of the page
+
+    def lum(x):
+        return float(wcag_luminance(np.minimum(x, 255.0).astype(np.float32) / 255.0))
+    if lum(c) >= want:
+        return tuple(int(v) for v in color[:3])
+    lo, hi = 0.0, 255.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if lum(c + mid) >= want else (mid, hi)
+    out = np.minimum(np.ceil(c + hi), 255.0)  # rounding up keeps it on the floor
+    return tuple(int(v) for v in out)
 
 
 def to_rgb(img, fill=None):
@@ -792,8 +830,13 @@ def side_focus(src, share, text_side):
 
 
 def column_alpha(cv, shade, text_side):
-    """Per-column shade of the 16:9 type column: solid across it, fading out by ~65% of the width."""
-    plateau, falloff = cv.margin + cv.col_w * 0.75, cv.w * 0.28
+    """Per-column shade of the 16:9 type column. A fixed --shade is solid across three quarters of the column and
+    gone by ~65% of the width; the auto shade (cv.shade_reach set) is solid across most of the type block and gone
+    SHADE_FALLOFF of the width later, so a short title shades less of the picture."""
+    if cv.shade_reach is None:
+        plateau, falloff = cv.margin + cv.col_w * 0.75, cv.w * 0.28
+    else:
+        plateau, falloff = cv.shade_reach, cv.w * SHADE_FALLOFF
     alpha = shade * (1 - smoothstep((np.arange(cv.w, dtype=np.float32) - plateau) / falloff))
     if text_side == "right":
         alpha = alpha[::-1]
@@ -836,15 +879,20 @@ def compose_tall(src, cv, bg, focus=None, shade=0.88, push=0.0, band=(0, 0), anc
     """Cover a tall canvas with the image and shade a band for the type.
 
     The crop keeps the busiest region (the subject) unless focus is given. The shade is
-    solid across `band` (the type block, padded) and fades out toward the image.
-    Returns (canvas, scale, mapper from source fractions to canvas px)."""
+    solid across `band` (the type block, padded) and fades out toward the image; shade None leaves it unshaded.
+    Graded once: returns (canvas, scale, mapper from source fractions to canvas px, texture reference: the same
+    picture before --push, for matching cut-outs, or None without push)."""
     if focus is None:
         focus = subject_focus(src, (cv.w / max(cv.w / src.width, cv.h / src.height)) / src.width)
     img, scale, sx, sy = cover(src, cv.w, cv.h, focus, vfocus)
-    canvas = depth(grade(img), cv, push)
-    canvas = shade_band(canvas, cv, bg, shade, band, anchor)
+    graded = grade(img)
+    canvas = depth(graded, cv, push)
+    tex = graded if push > 0 else None
+    if shade is not None:
+        canvas = shade_band(canvas, cv, bg, shade, band, anchor)
+        tex = shade_band(tex, cv, bg, shade, band, anchor) if tex is not None else None
     mapper = lambda fx, fy, s=scale, sx=sx, sy=sy: ((fx * src.width - sx) * s, (fy * src.height - sy) * s)  # noqa: E731
-    return canvas, scale, mapper
+    return canvas, scale, mapper, tex
 
 
 def shade_band(canvas, cv, bg, shade, band, anchor):
@@ -862,22 +910,32 @@ def compose_single(src, cv, text_side, bg, focus=0.5, feather=0.36, shade=0.88, 
 
     Narrower than 16:9 (see is_narrow): full height on the side away from the text, inner edge
     feathered into the background color. Otherwise cover-crop (focus moves the
-    crop). Both then shade the type column, solid across it and fading out by about
-    65% of the width. Returns (canvas, scale, mapper from source fractions to canvas px)."""
+    crop). Both then shade the type column, solid across it and fading out (column_alpha); shade None leaves
+    it unshaded. Graded once: returns (canvas, scale, mapper from source fractions to canvas px, texture reference:
+    the same picture before --push, for matching cut-outs, or None without push)."""
     if is_narrow(src, cv.w, cv.h, cropped):
         canvas = Image.new("RGB", (cv.w, cv.h), bg)
         w = int(round(src.width / src.height * cv.h))
         scale = cv.h / src.height
-        img = depth(grade(src.resize((w, cv.h), Image.LANCZOS)), cv, push)
+        graded = grade(src.resize((w, cv.h), Image.LANCZOS))
         ramp = feather_ramp(w, feather, text_side)
         x0 = cv.w - w if text_side == "left" else 0
-        canvas.paste(img, (x0, 0), Image.fromarray((np.tile(ramp, (cv.h, 1)) * 255).astype(np.uint8), "L"))
+        mask = Image.fromarray((np.tile(ramp, (cv.h, 1)) * 255).astype(np.uint8), "L")
+        tex = canvas.copy() if push > 0 else None
+        canvas.paste(depth(graded, cv, push), (x0, 0), mask)
+        if tex is not None:
+            tex.paste(graded, (x0, 0), mask)
         mapper = lambda fx, fy: (x0 + fx * w, fy * cv.h)  # noqa: E731
     else:
         img, scale, sx, sy = cover(src, cv.w, cv.h, focus)
-        canvas = depth(grade(img), cv, push)
+        graded = grade(img)
+        canvas = depth(graded, cv, push)
+        tex = graded if push > 0 else None
         mapper = lambda fx, fy, s=scale, sx=sx, sy=sy: ((fx * src.width - sx) * s, (fy * src.height - sy) * s)  # noqa: E731
-    return column_shade(canvas, cv, bg, shade, text_side), scale, mapper
+    if shade is not None:
+        canvas = column_shade(canvas, cv, bg, shade, text_side)
+        tex = column_shade(tex, cv, bg, shade, text_side) if tex is not None else None
+    return canvas, scale, mapper, tex
 
 
 # ---------------------------------------------------------------- subject box (a face or product label to keep clear)
@@ -1016,15 +1074,20 @@ def span_mask(n, lo, hi):
 def compose_solid(src, cv, bg, rect, focus=None, vfocus=None, push=0.0):
     """--backdrop solid: an opaque canvas of bg with the photo cover-cropped into rect, unshaded and without a
     vignette (focus and vfocus steer the crop; None picks the busiest window and centers vertically).
-    Returns (canvas, scale, mapper from source fractions to canvas px)."""
+    Returns (canvas, scale, mapper from source fractions to canvas px, texture reference or None, as compose_single)."""
     rw, rh = rect[2] - rect[0], rect[3] - rect[1]
     if focus is None:
         focus = subject_focus(src, (rw / max(rw / src.width, rh / src.height)) / src.width)
     img, scale, sx, sy = cover(src, rw, rh, focus, vfocus)
+    pushed, push = push, 0.0  # graded once, unpushed: that is the texture reference; --push softens a copy below
     canvas = Image.new("RGB", (cv.w, cv.h), tuple(bg))
     canvas.paste(depth(grade(img, vignette=0), cv, push), (rect[0], rect[1]))
+    tex = None
+    if pushed > 0:
+        tex, canvas = canvas, canvas.copy()
+        canvas.paste(depth(tex.crop(tuple(rect)), cv, pushed), (rect[0], rect[1]))
     mapper = lambda fx, fy: (rect[0] + (fx * src.width - sx) * scale, rect[1] + (fy * src.height - sy) * scale)  # noqa: E731
-    return canvas, scale, mapper
+    return canvas, scale, mapper, tex
 
 
 SUGGEST_MIN_CLEAR = 0.9  # mean visibility a suggested --crop must give the box
@@ -1580,34 +1643,61 @@ def element_contrast(canvas, layer, elements):
 
     For every element, the glyph pixels are the solid ones (alpha at least 90% of the
     element's own maximum, so a translucent kicker counts at its real strength); each is
-    composited over the background and compared with it. Type scores at its 15th percentile
-    (its worst parts); a logo at its 75th, so an outline or drop shadow drawn into the logo
-    doesn't count against it. Returns [(name, ratio, light-on-dark?, best possible ratio for
-    that color on any background)]."""
-    L = np.asarray(layer, dtype=np.float32) / 255.0
-    C = np.asarray(canvas.convert("RGB"), dtype=np.float32) / 255.0
+    composited over the background and compared with it (glyph_score). Returns [(name, ratio,
+    light-on-dark?, best possible ratio for that color on any background)]."""
+    L, C = np.asarray(layer), np.asarray(canvas.convert("RGB"))
     out = []
-    for name, (x0, y0, x1, y1) in elements:
-        x0, y0 = max(0, int(x0)), max(0, int(y0))
-        x1, y1 = min(canvas.width, int(x1)), min(canvas.height, int(y1))
-        if x1 - x0 < 2 or y1 - y0 < 2:
+    for name, box in elements:
+        g = glyph_pixels(L, box)
+        if g is None:
             continue
-        la, ca = L[y0:y1, x0:x1], C[y0:y1, x0:x1]
-        alpha = la[..., 3]
-        if alpha.max() < 0.05:
-            continue
-        m = alpha >= 0.9 * alpha.max()
-        if m.sum() < 12:
-            continue
-        a = alpha[..., None]
-        fg = ca * (1 - a) + la[..., :3] * a
-        lf, lb = wcag_luminance(fg)[m], wcag_luminance(ca)[m]
-        ratio = (np.maximum(lf, lb) + 0.05) / (np.minimum(lf, lb) + 0.05)
-        light = float(np.median(lf - lb)) >= 0
-        own = float(np.median(wcag_luminance(la[..., :3])[m]))
-        best = (own + 0.05) / 0.05 if light else 1.05 / (own + 0.05)
-        out.append((name, float(np.percentile(ratio, 75 if name == "logo" else 15)), light, best))
+        m, (x0, y0, x1, y1), la, xs = g
+        ca = C[y0:y1, x0:x1][m].astype(np.float32) / 255.0
+        out.append((name,) + glyph_score(name, la, ca, xs, x1 - x0, y1 - y0))
     return out
+
+
+def glyph_pixels(L, box):
+    """The solid glyph pixels of one element of an RGBA layer array: (mask over the clipped box, clipped box,
+    (N, 4) RGBA 0..1 of those pixels, their x within the box), or None when the element draws too little."""
+    x0, y0 = max(0, int(box[0])), max(0, int(box[1]))
+    x1, y1 = min(L.shape[1], int(box[2])), min(L.shape[0], int(box[3]))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    la = L[y0:y1, x0:x1].astype(np.float32) / 255.0
+    alpha = la[..., 3]
+    if alpha.max() < 0.05:
+        return None
+    m = alpha >= 0.9 * alpha.max()
+    if m.sum() < 12:
+        return None
+    return m, (x0, y0, x1, y1), la[m], np.nonzero(m)[1]
+
+
+def glyph_score(name, la, ca, xs, w, h):
+    """(ratio, light-on-dark?, best possible ratio) of one element from its glyph pixels (la: RGBA, ca: what is
+    behind them, RGB, both 0..1; xs: their x within the element's w x h box).
+
+    The element is cut into slices about as wide as it is tall (a letter or two of a line) and scored at its
+    worst slice, so one letter over a bright patch fails the line even when it holds little of the ink. Type
+    scores a slice at its 15th percentile (its worst parts); a logo at its 75th, so an outline or drop shadow
+    drawn into the logo doesn't count against it. A slice with under a quarter of the average ink (a serif or
+    an accent spilling over) doesn't count on its own."""
+    a = la[:, 3:]
+    fg = ca * (1 - a) + la[:, :3] * a
+    lf, lb = wcag_luminance(fg), wcag_luminance(ca)
+    ratio = (np.maximum(lf, lb) + 0.05) / (np.minimum(lf, lb) + 0.05)
+    light = float(np.median(lf - lb)) >= 0
+    own = float(np.median(wcag_luminance(la[:, :3])))
+    best = (own + 0.05) / 0.05 if light else 1.05 / (own + 0.05)
+    q = 75 if name == "logo" else 15
+    n = max(1, int(round(w / float(max(1, h)))))
+    part = np.minimum(xs * n // w, n - 1)
+    counts = np.bincount(part, minlength=n)
+    slices = np.nonzero(counts >= max(12, 0.25 * len(xs) / n))[0]
+    if n == 1 or not len(slices):
+        return float(np.percentile(ratio, q)), light, best
+    return min(float(np.percentile(ratio[part == k], q)) for k in slices), light, best
 
 
 def overlaps(a, b):
@@ -1712,6 +1802,8 @@ class Job:
     image_rect: tuple = None
     # set by _compose
     built: dict = None
+    shade_auto: bool = False  # --shade not given: _compose picks the lightest shade that reads (_auto_shade)
+    unshaded: tuple = None  # set by _backdrop: the single image composed once, before any shade (see there)
 
 
 def _check_args(j):
@@ -2329,44 +2421,67 @@ def _solid_layout(j):
     info["backdrop_color"] = hexcolor(j.bg)
 
 
+def _backdrop(j, shade_now):
+    """The picture behind the type at one shade, before the inset, cut-outs and type: (canvas, scale or the panels'
+    scales, mapper or None, texture reference for cut-outs or None). A single image is composed and graded once
+    per render (j.unshaded) and every call shades a copy. Panels are composed per call, or, once _auto_shade has
+    composed them unshaded and fully shaded (j.unshaded), mixed from those: their shade is linear in its strength."""
+    layout, cv, bg, band, src, push = j.layout, j.cv, j.bg, j.band, j.src, j.push
+    if layout == "panels":
+        if j.unshaded is not None:
+            (lo, hi), scales = j.unshaded
+            return Image.blend(lo, hi, shade_now), scales, None, None
+        canvas, scales = compose_panels(j.panels, cv, bg, shade_now, top_shade=not cv.tall and bool(j.panel_labels),
+                                        band_top=band[0], band=band)
+        return canvas, scales, None, None
+    if j.unshaded is None:
+        if j.backdrop != "solid" and cv.tall:
+            j.unshaded = compose_tall(src, cv, bg, j.focus_eff, None, push, band, j.anchor, j.vfocus)
+        elif j.backdrop == "solid":  # no shade: the type sits on the opaque panel
+            j.unshaded = compose_solid(src, cv, bg, j.image_rect, j.focus_eff, j.vfocus, push)
+        else:
+            j.unshaded = compose_single(src, cv, j.text_side, bg, 0.5 if j.focus_eff is None else j.focus_eff,
+                                        j.feather, None, push, j.cropped)
+    canvas, scale, mapper, tex = j.unshaded
+
+    def shaded(im):  # a copy: later steps paint on the canvas, and j.unshaded serves every build
+        if im is None or j.backdrop == "solid":
+            return im if im is None else im.copy()
+        if cv.tall:
+            return shade_band(im.copy(), cv, bg, shade_now, band, j.anchor)
+        return column_shade(im.copy(), cv, bg, shade_now, j.text_side)
+    return shaded(canvas), scale, mapper, shaded(tex)
+
+
+def _type_layer(j, canvas, warnings):
+    """Draw the type block, and the panel labels (whose scrims go on canvas), on a fresh layer:
+    (canvas, layer, block bbox, elements, panel label elements, names of labels already warned about)."""
+    cv = j.cv
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    align = "center" if j.layout == "panels" and not cv.tall else ("left" if cv.tall else j.text_side)
+    bbox, elements = draw_block(layer, j.items, j.bw, j.bh, cv, align, j.top)
+    label_elements, flagged = [], set()
+    if j.layout == "panels":
+        canvas, label_elements, flagged = place_panel_labels(layer, canvas, cv, panel_rects(cv, len(j.panels))[0],
+                                                             j.panel_labels, j.lspec, j.band, j.bg, warnings)
+    return canvas, layer, bbox, elements, label_elements, flagged
+
+
 def _build(j, shade_now):
     """Compose the picture at one shade and draw the type over it; returns this build's state and warnings."""
-    layout, panels, cv, bg, band, src, focus_eff, push = j.layout, j.panels, j.cv, j.bg, j.band, j.src, j.focus_eff, j.push
-    anchor, subjects, text_side, inset, inset_box = j.anchor, j.subjects, j.text_side, j.inset, j.inset_box
+    cv, band, subjects, text_side, inset, inset_box = j.cv, j.band, j.subjects, j.text_side, j.inset, j.inset_box
     w = []  # warnings from this build only, so a rebuild never duplicates them
     out = {"warnings": w, "scales": None, "subjects": [], "inset": None, "inset_rect": None, "mask": None}
-    mapper = None
-    tex = None
-    if layout == "panels":
-        canvas, scales = compose_panels(panels, cv, bg, shade_now, top_shade=not cv.tall and bool(j.panel_labels),
-                                        band_top=band[0], band=band)
-        out["scales"], scale = scales, max(scales)
-    elif j.backdrop == "solid":  # no shade: the type sits on the opaque panel
-        canvas, scale, mapper = compose_solid(src, cv, bg, j.image_rect, focus_eff, j.vfocus, push)
-        if subjects and push > 0:
-            tex = compose_solid(src, cv, bg, j.image_rect, focus_eff, j.vfocus, 0.0)[0]
-    elif cv.tall:
-        canvas, scale, mapper = compose_tall(src, cv, bg, focus_eff, shade_now, push, band, anchor, j.vfocus)
-        if subjects and push > 0:
-            tex = compose_tall(src, cv, bg, focus_eff, shade_now, 0.0, band, anchor, j.vfocus)[0]
-    else:
-        fx = 0.5 if focus_eff is None else focus_eff
-        canvas, scale, mapper = compose_single(src, cv, text_side, bg, fx, j.feather, shade_now, push, j.cropped)
-        if subjects and push > 0:
-            tex = compose_single(src, cv, text_side, bg, fx, j.feather, shade_now, 0.0, j.cropped)[0]
+    canvas, scale, mapper, tex = _backdrop(j, shade_now)
+    if j.layout == "panels":
+        out["scales"], scale = scale, max(scale)
     if inset is not None:
         canvas, out["inset"], out["inset_rect"] = place_inset(canvas, inset, inset_box or (0.25, 0.25, 0.75, 0.75),
                                                               mapper, cv, w, clip=j.image_rect)
     if subjects:
         canvas, out["subjects"], out["mask"] = place_subjects(canvas, subjects, cv, text_side, w,
                                                               band if cv.tall else None, tex, area=j.image_rect)
-    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    align = "center" if layout == "panels" and not cv.tall else ("left" if cv.tall else text_side)
-    bbox, elements = draw_block(layer, j.items, j.bw, j.bh, cv, align, j.top)
-    label_elements, flagged = [], set()
-    if layout == "panels":
-        canvas, label_elements, flagged = place_panel_labels(layer, canvas, cv, panel_rects(cv, len(panels))[0],
-                                                             j.panel_labels, j.lspec, band, bg, w)
+    canvas, layer, bbox, elements, label_elements, flagged = _type_layer(j, canvas, w)
     out.update(canvas=canvas, scale=scale, layer=layer, bbox=bbox, elements=elements, mapper=mapper, shade=shade_now,
                label_elements=label_elements, flagged=flagged,
                contrast=element_contrast(canvas, layer, elements + label_elements))
@@ -2383,9 +2498,12 @@ def _fixable(c):  # light type that fails only because of what is behind it
 
 
 def _compose(j):
-    """Build once; when light type fails only on a bright patch, rebuild darker and keep the better one."""
+    """Build once, at --shade or, when it isn't given, at the lightest shade that reads (_auto_shade); when light
+    type fails only on a bright patch, rebuild darker and keep the better one."""
     shade, info = j.shade, j.info
     warnings = info["warnings"]
+    if j.shade_auto and j.backdrop != "solid":
+        shade = _auto_shade(j)
     built = _build(j, shade)
     targets = {c[0] for c in built["contrast"] if _fixable(c)}
     if shade < 0.97 and targets and j.backdrop != "solid":  # a solid panel has no shade to raise
@@ -2400,7 +2518,86 @@ def _compose(j):
         info["inset"] = built["inset"]
     if built["inset_rect"] is not None:
         info["inset_rect"] = built["inset_rect"]
+    if j.backdrop != "solid":
+        info["shade"] = round(built["shade"], 2)
     j.built = built
+
+
+def _auto_shade(j):
+    """--shade not given: the lightest shade from SHADE_MIN to SHADE_MAX (0.01 steps) at which every element
+    reaches SHADE_TARGET, or what SHADE_MAX gives it when that is less, measured like element_contrast. The shade
+    mixes the picture toward bg, so what is behind the type at any shade follows from the unshaded picture and the
+    fully shaded one (panel labels' scrims included; a cut-out or inset is placed clear of the type). On 16:9 the
+    column shade's full strength first moves from three quarters of the column to SHADE_HOLD of the type block."""
+    cv = j.cv
+    if j.layout == "single" and not cv.tall:
+        cv.shade_reach = cv.margin + SHADE_HOLD * j.bw
+    ends = [_backdrop(j, a) for a in (0.0, 1.0)]
+    if j.layout == "panels":  # both ends are composed now: the build mixes them (_backdrop)
+        j.unshaded = (ends[0][0].copy(), ends[1][0].copy()), ends[0][1]
+    for i, end in enumerate(ends):
+        canvas, layer, _, elements, labels, _ = _type_layer(j, end[0], [])
+        ends[i] = np.asarray(canvas)
+    L = np.asarray(layer)
+    parts = []
+    for name, box in elements + labels:
+        g = glyph_pixels(L, box)
+        if g is not None:
+            m, (x0, y0, x1, y1), la, xs = g
+            c0, c1 = (e[y0:y1, x0:x1][m].astype(np.float32) / 255.0 for e in ends)
+            parts.append((name, la, c0, c1 - c0, xs, x1 - x0, y1 - y0))
+
+    def ratios(shade):
+        return [glyph_score(name, la, c0 + shade * d, xs, w, h)[0] for name, la, c0, d, xs, w, h in parts]
+    want = [min(SHADE_TARGET, r) for r in ratios(SHADE_MAX)]
+
+    def reads(k):
+        return all(r >= t - 1e-6 for r, t in zip(ratios(k / 100.0), want))
+    lo, hi = int(round(SHADE_MIN * 100)), int(round(SHADE_MAX * 100))  # reads(hi) holds by construction
+    if reads(lo):
+        hi = lo
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if reads(mid) else (mid, hi)
+    shade = hi / 100.0
+    short = list(dict.fromkeys(p[0] for p, t in zip(parts, want) if t < SHADE_TARGET - 1e-6))
+    j.info["notes"].append("shade %.2f (auto): the lightest that keeps every element at %.0f:1 contrast%s; --shade "
+                           "sets a fixed one" % (shade, SHADE_TARGET, "" if not short else
+                                                 ", or the %s at what %.2f gives it" % (" and the ".join(short),
+                                                                                       SHADE_MAX)))
+    return shade
+
+
+def _check_feed(j):
+    """How the picture sits in a feed. Hands the preview the --subject-box and --inset-box rects to outline (the
+    canvas's info["boxes"], canvas px; Image.convert copies it to the thumbnail render returns). On 16:9
+    thumbnails, notes the type the duration badge covers on the preview's 120 px tile (Canvas.timestamp_zone keeps
+    it clear from the 168 px tile up), and an explicit --bg so dark that most of the edge disappears into
+    YouTube's dark-theme page."""
+    cv, built, info = j.cv, j.built, j.info
+    boxes = [(n, tuple(int(round(v)) for v in r)) for n, r in (
+        ("subject box", (info.get("subject_box") or {}).get("rect")), ("inset box", info.get("inset_rect"))) if r]
+    if boxes:
+        built["canvas"].info["boxes"] = boxes
+    if cv.tall or j.mode == "post":
+        return
+    tw, th = 120, tile_height(120)
+    x0, y0, _, _ = badge_rect(tw, th)
+    zone = (int(cv.w * x0 / tw), int(cv.h * y0 / th), cv.w, cv.h)
+    hit = list(dict.fromkeys(n for n, b in built["elements"] + built["label_elements"] if overlaps(b, zone)))
+    if hit:
+        info["notes"].append("on the preview's 120 px tile the duration badge covers part of the %s; from 168 px up "
+                             "it stays clear" % " and the ".join(hit))
+    if page_contrast(j.bg) < EDGE_CONTRAST:  # a color taken from the image never is: an explicit --bg
+        a = np.asarray(built["canvas"].resize((480, 270), Image.BOX), dtype=np.float32) / 255.0
+        edge = np.concatenate([a[:2].reshape(-1, 3), a[-2:].reshape(-1, 3), a[2:-2, :2].reshape(-1, 3),
+                               a[2:-2, -2:].reshape(-1, 3)])
+        le, lp = wcag_luminance(edge), float(wcag_luminance(np.array(DARK_PAGE, dtype=np.float32) / 255.0))
+        merged = float(((np.maximum(le, lp) + 0.05) / (np.minimum(le, lp) + 0.05) < EDGE_MERGE).mean())
+        if merged > 0.4:
+            info["notes"].append("%d%% of the edge is as dark as YouTube's dark-theme page (#0f0f0f), so the thumbnail "
+                                 "loses its outline there; --bg %s (the same color, lifted) keeps it"
+                                 % (round(100 * merged), hexcolor(dark_tone_floor(j.bg))))
 
 
 def _under_type(rect, boxes, cv):
@@ -2733,11 +2930,12 @@ def _check_result(j):
         if n_words > 8:
             warnings.append("%d words of type; keep it to 8 or fewer so it reads at sidebar size." % n_words)
     _check_subject_box(j)
+    _check_feed(j)
     info["warnings"] = list(dict.fromkeys(warnings))  # drop exact repeats, keep order
 
 
 def render(src=None, title="", label="", kicker="", subtitle="", lead="title", style="serif",
-           text_side="auto", focus=None, accent="#ffffff", bg=None, feather=0.36, shade=0.88,
+           text_side="auto", focus=None, accent="#ffffff", bg=None, feather=0.36, shade=None,
            title_font=None, label_font=None, logo=None, logo_white=False, size="auto",
            panels=None, panel_labels=None, subjects=None, push=None, inset=None, inset_box=None,
            aspect=None, title_color="white", crop=None, title_tracking=None, subject_box=None,
@@ -2774,19 +2972,22 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
     The default fonts are bundled, so the type is the same on every machine; system_fonts=True tries the
     installed faces first (Bodoni MT, Bahnschrift, Didot...), as up to v0.7.0. title_font and label_font
     always win. band ("auto", "top", "bottom") sets where the type band goes on 4:5 and 9:16 (a single
-    capture without a cut-out); auto keeps it at the bottom unless the top keeps subject_box clearly more in view."""
+    capture without a cut-out); auto keeps it at the bottom unless the top keeps subject_box clearly more in view.
+    shade None (default) is the lightest shade that keeps every element at SHADE_TARGET contrast (_auto_shade,
+    info["shade"]); a number fixes it, as up to v0.9.0."""
     if aspect is None:
         aspect = "4:5" if mode == "post" else "16:9"
     info = {"warnings": [], "notes": [], "lead": lead, "aspect": aspect}
     if mode == "post":
         info["mode"] = "post"
     j = Job(src=src, title=title, label=label, kicker=kicker, subtitle=subtitle, lead=lead, style=style,
-            text_side=text_side, focus=focus, accent=accent, bg=bg, feather=feather, shade=shade,
+            text_side=text_side, focus=focus, accent=accent, bg=bg, feather=feather,
+            shade=SHADE_MAX if shade is None else shade,
             title_font=title_font, label_font=label_font, logo=logo, logo_white=logo_white, size=size,
             panels=panels, panel_labels=panel_labels, subjects=subjects, push=push, inset=inset,
             inset_box=inset_box, aspect=aspect, title_color=title_color, crop=crop, title_tracking=title_tracking,
             subject_box=subject_box, system_fonts=system_fonts, band_pos=band, mode=mode, body=body,
-            details=details, backdrop=backdrop, info=info)
+            details=details, backdrop=backdrop, info=info, shade_auto=shade is None)
     _check_args(j)
     _load_sources(j)
     _choose_layout(j)
@@ -2884,10 +3085,37 @@ def squint(img):
     return img.convert("L").filter(ImageFilter.GaussianBlur(max(1.0, img.width / 80))).convert("RGB")
 
 
+BOX_COLORS = {"subject box": (0, 229, 255), "inset box": (255, 196, 0)}  # outlines on the boxes tile
+
+
+def boxes_tile(thumb, w, h):
+    """thumb at w x h with the --subject-box and --inset-box rects render recorded (thumb.info["boxes"], thumbnail
+    px) outlined, a dark rim under each color so it shows on any picture: the check that a box estimated by eye
+    holds the face or the screen. None when there are no boxes."""
+    boxes = thumb.info.get("boxes")
+    if not boxes:
+        return None
+    tile = thumb.resize((w, h), Image.LANCZOS)
+    d = ImageDraw.Draw(tile)
+    kx, ky = w / float(thumb.width), h / float(thumb.height)
+    for name, (x0, y0, x1, y1) in boxes:
+        r = (x0 * kx, y0 * ky, x1 * kx, y1 * ky)
+        d.rectangle(r, outline=(0, 0, 0), width=4)
+        d.rectangle(r, outline=BOX_COLORS.get(name, WHITE), width=2)
+    return tile
+
+
+def boxes_caption(thumb):
+    """The boxes tile's caption: which boxes it outlines."""
+    return " and ".join(n for n, _ in thumb.info.get("boxes") or [])
+
+
 def preview_sheet(thumb):
     # (width, label, transform); notifications show no duration badge
     sizes = [(480, "home feed", "badge"), (320, "search", "badge"), (168, "up next", "badge"),
              (120, "smallest", "badge"), (88, "notification", None), (320, "squint test", "squint")]
+    if thumb.info.get("boxes"):  # where --subject-box and --inset-box landed (boxes_tile)
+        sizes.append((320, boxes_caption(thumb), "boxes"))
     gap, pad = 28, 28
     width = pad * 2 + sum(w for w, _, _ in sizes) + gap * (len(sizes) - 1)
     row_h = int(480 * 9 / 16) + 40
@@ -2903,6 +3131,8 @@ def preview_sheet(thumb):
                 tile = badge(tile)
             elif kind == "squint":
                 tile = squint(tile)
+            elif kind == "boxes":
+                tile = boxes_tile(thumb, w, h)
             sheet.paste(tile, (x, y0 + pad // 2), corner_mask(tile.size, max(4, int(w * 0.03))))
             preview_text(sheet, x, y0 + pad // 2 + h + 18, "%d px  %s" % (w, name), 13, fg)
             x += w + gap
@@ -2992,11 +3222,13 @@ def _themes():
 
 
 def feed_preview(thumb):
-    """4:5 in a Facebook-style feed card (desktop 500 px, phone 360 px) in dark and light, plus a squint."""
+    """4:5 in a Facebook-style feed card (desktop 500 px, phone 360 px) in dark and light, plus a squint (and the
+    boxes tile when render recorded a --subject-box or --inset-box)."""
     widths = [(500, "desktop feed"), (360, "phone feed")]
     pad, gap = 28, 28
     card_h = lambda w: 56 + int(w * 1.25) + 44  # noqa: E731
-    width = pad * 2 + sum(w for w, _ in widths) + 360 + gap * len(widths)
+    boxes = boxes_tile(thumb, 360, 450)
+    width = pad * 2 + sum(w for w, _ in widths) + 360 + gap * len(widths) + (360 + gap if boxes else 0)
     row_h = card_h(500) + 44
     sheet = Image.new("RGB", (width, row_h * 2), (255, 255, 255))
     for r, (page, card, bars, fg) in enumerate(_themes()):
@@ -3020,15 +3252,20 @@ def feed_preview(thumb):
         sq = squint(thumb.resize((360, 450), Image.LANCZOS))
         sheet.paste(sq, (x, y0 + pad // 2 + 56))
         preview_text(sheet, x, y0 + pad // 2 + 56 + 450 + 20, "360 px  squint test", 13, fg)
+        if boxes:
+            x += 360 + gap
+            sheet.paste(boxes, (x, y0 + pad // 2 + 56))
+            preview_text(sheet, x, y0 + pad // 2 + 56 + 450 + 20, "360 px  %s" % boxes_caption(thumb), 13, fg)
     return sheet
 
 
 def reels_preview(thumb):
     """9:16 under a Reels/Shorts-style overlay (header, button column, caption), the 3:4 profile-grid
-    crop, and a squint, in dark and light."""
+    crop, and a squint (and the boxes tile when render recorded a --subject-box or --inset-box), in dark and light."""
     pw, ph = 300, 533
     pad, gap = 28, 28
-    width = pad * 2 + pw * 2 + 160 + gap * 2
+    boxes = boxes_tile(thumb, pw, ph)
+    width = pad * 2 + pw * 2 + 160 + gap * 2 + (pw + gap if boxes else 0)
     row_h = ph + 56
     sheet = Image.new("RGB", (width, row_h * 2), (255, 255, 255))
     for r, (page, _, _, fg) in enumerate(_themes()):
@@ -3061,6 +3298,10 @@ def reels_preview(thumb):
         x += 160 + gap
         sheet.paste(squint(thumb.resize((pw, ph), Image.LANCZOS)), (x, y0 + pad // 2), corner_mask((pw, ph), 18))
         preview_text(sheet, x, y0 + pad // 2 + ph + 22, "%d px  squint test" % pw, 13, fg)
+        if boxes:
+            x += pw + gap
+            sheet.paste(boxes, (x, y0 + pad // 2), corner_mask((pw, ph), 18))
+            preview_text(sheet, x, y0 + pad // 2 + ph + 22, "%d px  %s" % (pw, boxes_caption(thumb)), 13, fg)
     return sheet
 
 
@@ -3095,7 +3336,7 @@ def export(thumb, stem, aspect="16:9"):
 
 # ---------------------------------------------------------------- CLI
 
-DEFAULTS = dict(style="serif", text_side="auto", focus=None, accent="#ffffff", bg=None, feather=0.36, shade=0.88,
+DEFAULTS = dict(style="serif", text_side="auto", focus=None, accent="#ffffff", bg=None, feather=0.36, shade=None,
                 title_font=None, label_font=None, logo=None, logo_white=False, lead="ab", size="auto", push=None,
                 kicker="", aspect="16:9", title_color="white", title_tracking=None, system_fonts=False, band="auto",
                 mode="thumbnail", backdrop="fade")
@@ -3255,7 +3496,8 @@ def main(argv=None):
     ap.add_argument("--accent", help="label box color: white (default), auto, or a color")
     ap.add_argument("--bg", help="background color, e.g. #0d0c0b (default: from the image's shadows)")
     ap.add_argument("--feather", type=float, help="edge fade for narrow art, share of its width")
-    ap.add_argument("--shade", type=float, help="darkness of the type side, 0 to 1")
+    ap.add_argument("--shade", type=float, help="darkness of the type side, 0 to 1 (default: auto, the lightest "
+                    "that keeps every element at 7:1 contrast, from 0.35 to 0.88)")
     ap.add_argument("--title-font", help="bundled font name (cinzel, bebas...; see --list-fonts) or a font file; "
                     "optional @Weight, e.g. cinzel@Black")
     ap.add_argument("--title-tracking", type=float, help="letter spacing of the big type in em, 0 to 0.5 (default: the font's own); wide, e.g. 0.12, for a thin, spaced-out logo")
