@@ -253,7 +253,8 @@ def canonical_weight(spec, entry, warnings):
 
 
 def missing_glyphs(font, text):
-    """Characters of `text` the font has no glyph for (drawn the same as an unassigned code point)."""
+    """Characters of `text` the font has no glyph for (drawn the same as an unassigned code point), the
+    " · " separator included: a hook split at it never draws it, so callers check the text as drawn."""
     size = getattr(font, "size", 40)
 
     def ink(ch):
@@ -265,7 +266,7 @@ def missing_glyphs(font, text):
         blank = ink("\U000FFFFD")
     except Exception:
         return []
-    return [ch for ch in sorted(set(text)) if not ch.isspace() and ch != "·"
+    return [ch for ch in sorted(set(text)) if not ch.isspace()
             and not unicodedata.category(ch).startswith("M")  # combining marks are drawn with their letter
             and ink(ch) == blank]
 
@@ -572,15 +573,35 @@ def signature_color(img, min_share=0.04):
 
 
 def lift_to_contrast(color, bg, target=MIN_CONTRAST * 1.15):
-    """Mix a color toward white, keeping its hue, until it reaches `target` WCAG contrast on bg."""
+    """Mix a color toward white on a dark bg, or toward black on a light one (is_light), keeping its hue,
+    until it reaches `target` WCAG contrast on bg."""
     lb = float(wcag_luminance(np.array(bg[:3], dtype=np.float32) / 255.0))
+    end = 0.0 if is_light(bg) else 255.0
     c = np.array(color[:3], dtype=np.float32)
     for t in np.linspace(0, 1, 41):
-        m = c + (255 - c) * t
+        m = c + (end - c) * t
         lf = float(wcag_luminance(m / 255.0))
         if (max(lf, lb) + 0.05) / (min(lf, lb) + 0.05) >= target:
             return tuple(int(round(x)) for x in m)
-    return WHITE
+    return (int(end),) * 3
+
+
+# Above this WCAG luminance black type reads better than white (both give about 4.6:1 there).
+LIGHT_LUMINANCE = 0.179
+INK_DARK = (18, 18, 18)  # small type on a light background
+
+
+def is_light(color):
+    """True for a background that dark type reads better on; None for no color."""
+    if color is None:
+        return None
+    return float(wcag_luminance(np.array(color[:3], dtype=np.float32) / 255.0)) > LIGHT_LUMINANCE
+
+
+def ink_for(bg):
+    """Color of the small type that has no flag of its own (kicker, subtitle, post text): white, or near-black
+    on a light background."""
+    return INK_DARK if is_light(bg) else WHITE
 
 
 # ---------------------------------------------------------------- layer matching
@@ -1223,24 +1244,61 @@ def place_inset(canvas, inset, box, mapper, cv, warnings, clip=None):
 
 # ---------------------------------------------------------------- type
 
-def _fkw(font):
+def _fkw(font, ligatures=True):
     """OpenType features for layout: lining figures, so serif and blackletter numbers sit on the
-    baseline at full height. Needs Pillow's raqm layout; without it, layout is unchanged."""
+    baseline at full height. ligatures=False also turns off ligatures and contextual alternates, so a
+    pair measures as its two letters drawn one by one (tracked type) set. Needs Pillow's raqm layout;
+    without it, layout is unchanged (and has no ligatures)."""
     raqm = getattr(ImageFont, "Layout", None) and getattr(font, "layout_engine", None) == ImageFont.Layout.RAQM
-    return {"features": LAYOUT_FEATURES} if LAYOUT_FEATURES and raqm else {}
+    if not (LAYOUT_FEATURES and raqm):
+        return {}
+    return {"features": LAYOUT_FEATURES + ([] if ligatures else ["-liga", "-clig", "-calt"])}
+
+
+def _clusters(text):
+    """The units tracked type draws one at a time: a letter with the accents, variation selectors and
+    joined characters (ZWJ emoji, flag pairs) that belong to it, so a mark is never set apart from its
+    letter."""
+    out, joined = [], False
+    for c in text:
+        o = ord(c)
+        attach = (unicodedata.category(c) in ("Mn", "Mc", "Me") or c == "‍" or 0xFE00 <= o <= 0xFE0F
+                  or 0xE0100 <= o <= 0xE01EF or 0x1F3FB <= o <= 0x1F3FF
+                  or (0x1F1E6 <= o <= 0x1F1FF and out and len(out[-1]) == 1 and 0x1F1E6 <= ord(out[-1]) <= 0x1F1FF))
+        if out and (attach or joined):
+            out[-1] += c
+        else:
+            out.append(c)
+        joined = c == "‍"
+    return out
+
+
+def needs_shaping(text):
+    """True for text that only reads when the whole line is shaped at once: right-to-left scripts (Hebrew,
+    Arabic) and joining or reordering ones (Indic, Thai, Lao, Tibetan, Myanmar, Khmer, Mongolian). Tracking
+    draws letters one at a time, which would set them unjoined and left to right, so such a line is drawn
+    whole, without tracking."""
+    for c in text:
+        o = ord(c)
+        if (unicodedata.bidirectional(c) in ("R", "AL", "AN") or 0x0900 <= o <= 0x0DFF or 0x0E00 <= o <= 0x0FFF
+                or 0x1000 <= o <= 0x109F or 0x1780 <= o <= 0x18AF):
+            return True
+    return False
 
 
 def _advances(font, text, tracking, space=0.0):
-    """Per-character advance for tracked text, keeping each pair's kerning (AV, TO, YO). `space` is a
-    minimum advance for a word space (preview captions: some fonts' spaces vanish at 12 px)."""
-    kw = _fkw(font)
-    w = [font.getlength(c, **kw) for c in text]
+    """Per-cluster advance (see _clusters) for tracked text, keeping each pair's kerning (AV, TO, YO). Pairs
+    are measured with ligatures off, as drawn one by one: a ligated fi or ff would pull the next letter into
+    the f. `space` is a minimum advance for a word space (preview captions: some fonts' spaces vanish at 12 px)."""
+    kw = _fkw(font, ligatures=False)
+    units = _clusters(text)
+    w = [font.getlength(u, **kw) for u in units]
     out = []
-    for i in range(len(text)):
+    for i in range(len(units)):
         a = w[i]
-        if i + 1 < len(text):
-            a += tracking + font.getlength(text[i:i + 2], **kw) - w[i] - w[i + 1]
-        if text[i] == " ":
+        if i + 1 < len(units):
+            a += tracking + font.getlength(units[i] + units[i + 1], **kw) - w[i] - w[i + 1]
+        if units[i] == " ":
             a = max(a, space)
         out.append(a)
     return out
@@ -1249,16 +1307,18 @@ def _advances(font, text, tracking, space=0.0):
 def text_width(font, text, tracking, space=0.0):
     if not text:
         return 0.0
-    if tracking or space:
+    if (tracking or space) and not needs_shaping(text):
         return sum(_advances(font, text, tracking, space))
     return font.getlength(text, **_fkw(font))
 
 
 def draw_text(draw, x, baseline, text, font, tracking, fill, space=0.0):
-    if not tracking and not space:
+    """Draw a line with its left end at x. Tracked type goes one cluster at a time; a line that needs
+    shaping (needs_shaping) is drawn whole and untracked, as text_width measures it."""
+    if (not tracking and not space) or needs_shaping(text):
         draw.text((x, baseline), text, font=font, fill=fill, anchor="ls", **_fkw(font))
         return
-    for c, a in zip(text, _advances(font, text, tracking, space)):
+    for c, a in zip(_clusters(text), _advances(font, text, tracking, space)):
         draw.text((x, baseline), c, font=font, fill=fill, anchor="ls", **_fkw(font))
         x += a
 
@@ -1274,6 +1334,31 @@ def split_lines(text):
     return [ln.strip() for ln in text.split("\n") if ln.strip()]
 
 
+def one_line(text):
+    """Text for a single-line element (label box, kicker, subtitle, panel label): its lines joined with a
+    space, so a \\n meant for the big type never shows as a backslash."""
+    return " ".join(split_lines(text or ""))
+
+
+def oldstyle_figures(font, digits, context=True):
+    """True when the font sets these digits as oldstyle figures (a 1 at x-height, a 9 below the baseline).
+    Some fonts (Zilla Slab) have lining figures only beside Latin letters: digits drawn on their own, as
+    tracked type draws every character, or a line of digits only, stay oldstyle. context=False measures them
+    that way. Each digit is measured on its own ink: under 85% of the cap height, or reaching a tenth of the
+    size below the baseline."""
+    size = getattr(font, "size", 100)
+    cap, kw = cap_metrics(font, "H")[0], _fkw(font)
+    pre = "H" if context else ""
+    x0 = int(font.getlength(pre, **kw)) + 1 if pre else 0  # the digit's own ink starts past the H's advance
+    for d in sorted(set(digits)):
+        im = Image.new("L", (x0 + size * 2, size * 3), 0)
+        ImageDraw.Draw(im).text((0, size * 2), pre + d, font=font, fill=255, anchor="ls", **kw)
+        rows = np.flatnonzero((np.asarray(im)[:, x0:] > 127).any(axis=1))
+        if len(rows) and (size * 2 - rows[0] < 0.85 * cap or rows[-1] - size * 2 > 0.1 * size):
+            return True
+    return False
+
+
 def fit_title(spec, lines, tracking_em, max_w, cv, max_size=190):
     size, floor, step = cv.px(max_size), cv.px(min(48, max_size)), max(2, cv.px(4))
     while size > floor:
@@ -1282,6 +1367,11 @@ def fit_title(spec, lines, tracking_em, max_w, cv, max_size=190):
             break
         size -= step
     return load_font(spec, size), size
+
+
+def _too_wide(font, lines, tracking, max_w):
+    """True when a line still runs past max_w (fit_title stops shrinking at its floor size)."""
+    return max(text_width(font, ln, tracking) for ln in lines) > max_w + 1
 
 
 def fit_small(spec, text, size, floor, max_w, tracking_ratio, pad=0):
@@ -1390,10 +1480,13 @@ def post_words(text):
 
 def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent,
                logo=None, logo_big=True, max_w=None, stack=False, max_size=190, big_name="title",
-               big_color=(255, 255, 255, 255), box_first=False, extra=None):
+               big_color=(255, 255, 255, 255), box_first=False, extra=None, ink=None):
     """Type stack: kicker, (small logo), big lines or big logo, subtitle, boxed label.
     stack=True fits each big line on its own (capped at 1.6x the smallest), so a short
-    first line leads a longer second one. Small lines shrink to fit max_w.
+    first line leads a longer second one. Small lines shrink to fit max_w; they are drawn in the
+    case given (_assign_roles sets it from the label font). ink is the color of the kicker,
+    subtitle and post text: white, or near-black on a light background (ink_for); None follows
+    the big type's polarity.
     Posts: box_first puts the boxed label above the big type, as a tag, and `extra` (post_items:
     body and details lines, already wrapped) follows the stack.
     Returns (items, block width, block height, big size)."""
@@ -1401,6 +1494,8 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
     lines = split_lines(big) if big else []
     tsize = cv.px(140)
     fonts = []
+    if ink is None:  # dark big type sits on a light background: so does the small type
+        ink = WHITE if big_color is None or is_light(big_color) else INK_DARK
     if lines:
         font, tsize = fit_title(tspec, lines, tracking_em, max_w, cv, max_size)
         if len(lines) == 1 and " " in lines[0]:  # wrap at the middle space when it helps
@@ -1411,6 +1506,14 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
             # too small on one line, or a clear gain (narrow fonts) without orphaning a short word
             if tsize < cv.px(100) or (wsize >= tsize * 1.3 and min(len(w) for w in wrapped) >= 3):
                 lines, font, tsize = wrapped, wfont, wsize
+            if len(words) >= 3 and _too_wide(font, lines, tracking_em * tsize, max_w):
+                # still wider than the column at the smallest size: three lines, balanced by length
+                cut = min(((a, b) for a in range(1, len(words) - 1) for b in range(a + 1, len(words))),
+                          key=lambda c: max(len(" ".join(p)) for p in (words[:c[0]], words[c[0]:c[1]], words[c[1]:])))
+                three = [" ".join(words[:cut[0]]), " ".join(words[cut[0]:cut[1]]), " ".join(words[cut[1]:])]
+                tfont, t3 = fit_title(tspec, three, tracking_em, max_w, cv, max_size)
+                if t3 > tsize or not _too_wide(tfont, three, tracking_em * t3, max_w):
+                    lines, font, tsize = three, tfont, t3
         fonts = [(font, tsize)] * len(lines)
         if stack and len(lines) > 1:
             fitted = [fit_title(tspec, [ln], tracking_em, max_w, cv, max_size) for ln in lines]
@@ -1424,13 +1527,13 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
     # (kind, text, font, tracking, height_above, depth, gap_before, color, name)
     items = []
     if kicker:
-        f, trk = fit_small(lspec, kicker.upper(), cv.px(26), cv.px(16), max_w, 6 / 26)
-        a, d = cap_metrics(f, kicker.upper())
-        items.append(("text", kicker.upper(), f, trk, a, d, 0, (255, 255, 255, 185), "kicker"))
+        f, trk = fit_small(lspec, kicker, cv.px(26), cv.px(16), max_w, 6 / 26)
+        a, d = cap_metrics(f, kicker)
+        items.append(("text", kicker, f, trk, a, d, 0, tuple(ink[:3]) + (185,), "kicker"))
     if box and box_first:
-        f, trk = fit_small(lspec, box.upper(), cv.px(30), cv.px(18), max_w, 5 / 30, pad=2 * cv.px(22))
-        a, _ = cap_metrics(f, box.upper())
-        items.append(("box", box.upper(), f, trk, int(a + 2 * cv.px(15)), 0, cv.px(18) if items else 0, accent,
+        f, trk = fit_small(lspec, box, cv.px(30), cv.px(18), max_w, 5 / 30, pad=2 * cv.px(22))
+        a, _ = cap_metrics(f, box)
+        items.append(("box", box, f, trk, int(a + 2 * cv.px(15)), 0, cv.px(18) if items else 0, accent,
                       "label box"))
     if logo is not None and not logo_big:
         items.append(("image", logo, None, 0, logo.height, 0, cv.px(18) if items else 0, None, "logo"))
@@ -1441,15 +1544,18 @@ def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent
     if logo is not None and logo_big:
         items.append(("image", logo, None, 0, logo.height, 0, int(tsize * 0.22) if items else 0, None, "logo"))
     if subtitle:
-        f, trk = fit_small(lspec, subtitle.upper(), cv.px(28), cv.px(16), max_w, 5 / 28)
-        a, d = cap_metrics(f, subtitle.upper())
-        items.append(("text", subtitle.upper(), f, trk, a, d, int(tsize * 0.18), (255, 255, 255, 215), "subtitle"))
+        f, trk = fit_small(lspec, subtitle, cv.px(28), cv.px(16), max_w, 5 / 28)
+        a, d = cap_metrics(f, subtitle)
+        items.append(("text", subtitle, f, trk, a, d, int(tsize * 0.18), tuple(ink[:3]) + (215,), "subtitle"))
     if box and not box_first:
-        f, trk = fit_small(lspec, box.upper(), cv.px(30), cv.px(18), max_w, 5 / 30, pad=2 * cv.px(22))
-        a, _ = cap_metrics(f, box.upper())
-        items.append(("box", box.upper(), f, trk, int(a + 2 * cv.px(15)), 0, int(tsize * 0.32), accent,
+        f, trk = fit_small(lspec, box, cv.px(30), cv.px(18), max_w, 5 / 30, pad=2 * cv.px(22))
+        a, _ = cap_metrics(f, box)
+        items.append(("box", box, f, trk, int(a + 2 * cv.px(15)), 0, int(tsize * 0.32), accent,
                       "label box"))
-    if extra:  # the first post line keeps clear of the headline: a share of its size, at least the item's own gap
+    if extra:  # post text set in white takes the ink; the first line keeps clear of the headline (a share of its
+        # size, at least the item's own gap)
+        extra = [it[:7] + ((tuple(ink[:3]) + tuple(it[7][3:]),) if tuple(it[7][:3]) == WHITE else (it[7],)) + it[8:]
+                 for it in extra]
         items.append(extra[0][:6] + ((max(extra[0][6], int(tsize * 0.30)) if items else 0),) + extra[0][7:])
         items.extend(extra[1:])
     width, height = 0.0, 0
@@ -1712,6 +1818,8 @@ class Job:
     image_rect: tuple = None
     # set by _compose
     built: dict = None
+    # set by _assign_roles: the kicker's and subtitle's color, white or near-black on a light --bg (ink_for)
+    ink: tuple = None
 
 
 def _check_args(j):
@@ -1719,9 +1827,13 @@ def _check_args(j):
     title, label, kicker, subtitle, panel_labels = j.title, j.label, j.kicker, j.subtitle, j.panel_labels
     aspect, style, panels, src, inset, subjects, crop = j.aspect, j.style, j.panels, j.src, j.inset, j.subjects, j.crop
     subject_box = j.subject_box
-    # composed accents (e + U+0301 -> é) so tracked type and glyph checks see one letter
-    title, label, kicker, subtitle = (unicodedata.normalize("NFC", t or "") for t in (title, label, kicker, subtitle))
-    panel_labels = [unicodedata.normalize("NFC", p or "") for p in panel_labels] if panel_labels else panel_labels
+    # composed accents (e + U+0301 -> é) so tracked type and glyph checks see one letter; a typed \n (the
+    # shell passes a backslash and an n) becomes a line break once, here. Only the big type has lines: the
+    # title and the label keep theirs (either may lead), single-line elements join theirs with a space.
+    title, label, kicker, subtitle = (unicodedata.normalize("NFC", t or "").replace("\\n", "\n").replace("\r\n", "\n")
+                                      for t in (title, label, kicker, subtitle))
+    kicker, subtitle = one_line(kicker), one_line(subtitle)
+    panel_labels = [one_line(unicodedata.normalize("NFC", p or "")) for p in panel_labels] if panel_labels else panel_labels
     if j.mode not in MODES:
         raise ValueError("mode must be one of %s" % ", ".join(MODES))
     j.body, j.details = (unicodedata.normalize("NFC", t or "").strip() for t in (j.body, j.details))
@@ -1946,13 +2058,17 @@ def _pick_color(value, what, image, bg, notes):
         return WHITE, "white"
     if key == "auto":
         sig = signature_color(image)
+        if sig is None and is_light(bg):  # white would vanish on a light --bg
+            notes.append("no strong signature color in the image, so %s is near-black on the light --bg" % what)
+            return INK_DARK, "%s (auto: no signature color in the image; dark on the light --bg)" % hexcolor(INK_DARK)
         if sig is None:
             notes.append("no strong signature color in the image, so %s stays white" % what)
             return WHITE, "white (auto: no signature color in the image)"
         c = lift_to_contrast(sig, bg)
         if c == sig:
             return c, "%s (auto: the image's own color)" % hexcolor(c)
-        return c, "%s (auto: the image's %s, lightened for contrast)" % (hexcolor(c), hexcolor(sig))
+        return c, "%s (auto: the image's %s, %s for contrast)" % (
+            hexcolor(c), hexcolor(sig), "darkened" if is_light(bg) else "lightened")
     c = rgb(value)
     return c, hexcolor(c)
 
@@ -1973,18 +2089,30 @@ def _prepare_logo(logo, logo_white):
 
 
 def _assign_roles(j):
-    """Which text is big and which goes in the box, their colors, and the title-source line."""
+    """Which text is big and which goes in the box, their case and colors, the title-source line, and the
+    checks of the text against the fonts that draw it (_check_text)."""
     lead, label, title, logo, logo_white, caps_ok = j.lead, j.label, j.title, j.logo, j.logo_white, j.caps_ok
     title_font, title_tracking, tracking_em, entry, tspec, style = j.title_font, j.title_tracking, j.tracking_em, j.entry, j.tspec, j.style
     info = j.info
     warnings = info["warnings"]
+    lentry = bundled_entry(j.label_font) if j.label_font else None
+    label_caps = lentry["caps"] if lentry else True
+
+    def small(text):  # the label font's single lines: in caps, unless that font reads poorly in them
+        return text.upper() if label_caps else text
     if lead == "label" and label:
         hook = label.upper() if caps_ok else label  # blackletter and script fonts break in all caps
-        big, box, logo_big = hook.replace(" · ", "\n").replace("·", "\n"), title, False
+        big, box, logo_big = hook.replace(" · ", "\n").replace("·", "\n"), small(one_line(title)), False
         if logo is not None:
             box = ""  # the logo stands for the title
     else:
-        big, box, logo_big = ("" if logo is not None else title), label, True
+        big, box, logo_big = ("" if logo is not None else title), small(one_line(label)), True
+    j.kicker, j.subtitle = small(j.kicker), small(j.subtitle)
+    if logo is not None and title.strip():
+        where = "--body" if j.mode == "post" else "--kicker" if label else "--label"
+        info["notes"].append("--logo replaces the title, so %r is not drawn%s; put it in %s if it must show"
+                             % (one_line(title), " and --title-font has no effect" if title_font and not big else "",
+                                where))
     big_name = "hook" if lead == "label" and label else "title"
     if logo is not None and not big:  # the logo is the big element and keeps its own colors (or turns white)
         big_rgb, big_desc = WHITE, ("logo, white (--logo-white)" if logo_white else "logo, its own colors")
@@ -2028,12 +2156,64 @@ def _assign_roles(j):
         shown = " ".join(split_lines(big))
         missing = missing_glyphs(load_font(tspec, 64), shown)
         if missing:
-            warnings.append("the title font has no glyph for %s: pick another font (--list-fonts) or drop the "
-                            "character." % ", ".join("U+%04X" % ord(c) for c in missing))
+            warnings.append("the title font has no glyph for %s: pick another font (--list-fonts)%s." % (
+                ", ".join("U+%04X" % ord(c) for c in missing), "" if j.mode == "post" else " or drop the character"))
         if not caps_ok and len(shown) > 3 and shown.upper() == shown and shown.lower() != shown:
             warnings.append("%s reads poorly in all caps: write the big type in Title Case."
                             % title_font.partition("@")[0].strip().lower())
     j.big, j.box, j.logo_big, j.big_name, j.big_rgb, j.accent_rgba = big, box, logo_big, big_name, big_rgb, accent_rgba
+    j.ink = ink_for(j.bg)
+    _check_text(j)
+
+
+def _font_name(flag, spec):
+    """How a warning names a font: the flag value as given, else its bundled name (outfit@SemiBold) or file."""
+    if flag:
+        return flag
+    if not spec:
+        return "Pillow's default font"
+    path, _, inst = spec.partition("@")
+    for name, e in font_catalog().items():
+        if os.path.normcase(os.path.normpath(os.path.join(FONT_ROOT, e["file"]))) == os.path.normcase(path):
+            return name + ("@" + inst if inst else "")
+    return os.path.basename(path)
+
+
+def _check_text(j):
+    """The text against the fonts that draw it: glyphs the label font lacks (label box, kicker, subtitle, panel
+    labels; _assign_roles checks the big type) and scripts that tracking would break (needs_shaping). Post body
+    and details are checked with the post text; numbers in the big type once it is laid out (_check_figures)."""
+    info, warnings, post = j.info, j.info["warnings"], j.mode == "post"
+    small = [("label box", j.box), ("kicker", j.kicker), ("subtitle", j.subtitle)]
+    small += [("panel label %d" % (i + 1), p.upper()) for i, p in enumerate(j.panel_labels or []) if p]
+    small = [(n, t) for n, t in small if t]
+    gaps = {}  # character -> the elements that use it
+    if small:
+        lfont = load_font(j.lspec, 64)
+        for name, text in small:
+            for ch in missing_glyphs(lfont, text):
+                gaps.setdefault(ch, []).append(name)
+    if gaps:
+        names = []
+        for ns in gaps.values():
+            names += [n for n in ns if n not in names]
+        warnings.append("the label font (%s) has no glyph for %s (in the %s): pick another --label-font "
+                        "(--list-fonts)%s." % (_font_name(j.label_font, j.lspec),
+                                              ", ".join("U+%04X" % ord(c) for c in sorted(gaps)), " and the ".join(names),
+                                              "" if post else " or drop the character"))
+    lines = split_lines(j.big) if j.big else []
+    shaped = [n for n, t in [(j.big_name, " ".join(lines))] + small if t and needs_shaping(t)]
+    if shaped and not LAYOUT_FEATURES:
+        warnings.append("this Pillow has no raqm text layout, so the %s (a right-to-left or joining script) is drawn "
+                        "unjoined and left to right: install the FriBiDi library, which Pillow's raqm layout loads, "
+                        "and render again." % " and the ".join(shaped))
+    elif shaped:
+        tracked = [n for n in shaped if n != j.big_name or j.tracking_em > 0]
+        if tracked:
+            info["notes"].append("the %s %s a right-to-left or joining script, so %s set as shaped words without "
+                                 "letter spacing (tracking would break the letters apart)" % (
+                                     " and the ".join(tracked), "is" if len(tracked) == 1 else "are in",
+                                     "it is" if len(tracked) == 1 else "they are"))
 
 
 def _type_room(j):
@@ -2139,8 +2319,9 @@ def _fit_block(j, avail):
     while True:
         items, bw, bh, big_size = text_block(j.cv, j.big, j.box, j.kicker, j.subtitle, j.tspec, j.lspec,
                                              j.tracking_em, j.accent_rgba, j.logo, j.logo_big, j.max_w,
-                                             stack=(j.lead == "label" and "·" in j.label), max_size=cap,
-                                             big_name=j.big_name, big_color=j.big_rgb + (255,))
+                                             stack=(j.lead == "label" and ("·" in j.label or "\n" in j.label)),
+                                             max_size=cap, big_name=j.big_name, big_color=j.big_rgb + (255,),
+                                             ink=j.ink)
         if bh <= avail or cap <= 48:
             break
         cap = max(48, int(cap * 0.88))
@@ -2241,13 +2422,11 @@ def _fit_type(j):
     info["big_size"] = big_size
     if cap < base:
         info["notes"].append("type scaled down to fit the height")
-    if big and big_size < cv.px(72):
-        big_lines = [it[1] for it in items if it[0] == "text" and it[8] == big_name]
-        if len(big_lines) == 1 and " " in big_lines[0]:
-            fix = "split it over two lines with \\n (e.g. DAWN\\nWALKER) or pick a narrower font (bebas, oswald)"
-        else:
-            fix = "this font is wide for this text: shorten it or pick a narrower font (bebas, oswald)"
-        warnings.append("the big type is only %d px tall at this width: %s." % (big_size, fix))
+    big_items = [it for it in items if it[0] == "text" and it[8] == big_name]
+    wide = _check_column(j, items)
+    if big and big_items:
+        _check_big_type(j, big_items, big_name in wide)
+        _check_figures(j, [it[1] for it in big_items])
     if logo is not None:
         logo_item = [it for it in items if it[0] == "image"][0][1]
         k = logo_item.width / logo.width
@@ -2257,6 +2436,131 @@ def _fit_type(j):
             warnings.append("the logo is too wide to read as the title (%d px tall): use a stacked logo or text."
                             % logo_item.height)
     j.items, j.bw, j.bh = items, bw, bh
+
+
+# The big type's smallest readable size, measured on the drawn letters: capital height (x-height for Title
+# Case in a font that reads poorly in caps) in design px (1280 wide, 1080 on 4:5 and 9:16). 50 is 72 px of
+# Playfair or Outfit, 6.6 px on the 168 px "up next" tile; a font with small capitals (typewriter, teko)
+# needs a larger size to reach it.
+BIG_MIN_CAP = 50
+# Main strokes thinner than this many px where the thumbnail is shown smallest (the 168 px tile; the phone
+# feed width on 4:5 and 9:16) grey out: Light weights reach it long before the letters get small.
+BIG_MIN_STEM = 1.2
+
+
+def stem_width(font, ch):
+    """Width in px of the main stroke of `ch`: the longest run of ink across the row at half its height."""
+    size = getattr(font, "size", 40)
+    im = Image.new("L", (size * 3, size * 3), 0)
+    base = size * 2
+    ImageDraw.Draw(im).text((size, base), ch, font=font, fill=255, anchor="ls", **_fkw(font))
+    row = np.asarray(im)[base - max(1, cap_metrics(font, ch)[0] // 2)] > 127
+    edges = np.diff(np.concatenate(([0], row.astype(np.int8), [0])))
+    starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+    return int((ends - starts).max()) if len(starts) else 0
+
+
+def _check_big_type(j, big_items, too_wide=False):
+    """Warn when the big type is too small or too thin to read where the thumbnail is shown smallest, measured
+    on the smallest big line: its capital (or x-) height against BIG_MIN_CAP, its stroke against BIG_MIN_STEM.
+    too_wide: _check_column already warned that it runs past the column, with the fix."""
+    cv, warnings, post = j.cv, j.info["warnings"], j.mode == "post"
+    font, text = min(((it[2], it[1]) for it in big_items), key=lambda ft: ft[0].size)
+    lower = not j.caps_ok and any(c.islower() for c in text)  # Title Case blackletter or script: x-height reads
+    cap = cap_metrics(font, "x" if lower else "H")[0]
+    if cap < BIG_MIN_CAP * cv.u and too_wide:
+        return
+    if cap < BIG_MIN_CAP * cv.u:
+        lines = [it[1] for it in big_items]
+        if len(lines) == 1 and " " in lines[0]:
+            fix = "split it over two lines with \\n (e.g. DAWN\\nWALKER) or pick a narrower font (bebas, oswald)"
+        elif post:
+            fix = "this font is wide for this text: pick a narrower font (bebas, oswald)"
+        else:
+            fix = "this font is wide for this text: shorten it or pick a narrower font (bebas, oswald)"
+        warnings.append("the big type is only %d px tall (its %s) at this width, under %d: %s."
+                        % (cap, "x-height" if lower else "capitals", round(BIG_MIN_CAP * cv.u), fix))
+        return
+    shown = POST_FEED_WIDTH[j.aspect] if cv.tall else BADGE["tile"]
+    letter = "l" if lower else "I"
+    stem = stem_width(font, letter) * shown / float(cv.w)
+    if stem >= BIG_MIN_STEM:
+        return
+    heavier = _heavier_weight(j, font.size, letter, BIG_MIN_STEM * cv.w / float(shown))
+    fix = ("use --title-font %s@%s" % (j.title_font.partition("@")[0].strip(), heavier) if heavier and j.title_font
+           else "use a heavier --title-font weight (e.g. outfit@Bold)")
+    warnings.append("the big type's strokes are only %.1f px wide on the %d px %s (want %.1f px or more), so it greys "
+                    "out: %s." % (stem, shown, "phone feed" if cv.tall else "\"up next\" tile", BIG_MIN_STEM, fix))
+
+
+def _heavier_weight(j, size, letter, need):
+    """The lightest named weight of the title font, heavier than the one in use, whose stroke is at least
+    `need` px at this size (else its heaviest); None for a single-weight font or one at its heaviest."""
+    path, _, inst = (j.tspec or "").partition("@")
+    try:
+        names = [n.decode() if isinstance(n, bytes) else n for n in load_font(j.tspec, size).get_variation_names()]
+    except Exception:
+        return None
+    if inst not in names or names.index(inst) == len(names) - 1:
+        return None
+    for n in names[names.index(inst) + 1:]:
+        if stem_width(load_font(path + "@" + n, size), letter) >= need:
+            return n
+    return names[-1]
+
+
+def _check_figures(j, lines):
+    """Warn when the big type's numbers come out as oldstyle figures (oldstyle_figures): in every setting, or
+    only where tracking draws them one by one or a line holds no letters (Zilla Slab)."""
+    numbered = [ln for ln in lines if any(c in "0123456789" for c in ln) and not needs_shaping(ln)]
+    if not numbered:
+        return
+    warnings = j.info["warnings"]
+    font = load_font(j.tspec, 200)
+    digits = "".join(sorted({c for ln in numbered for c in ln if c in "0123456789"}))
+    name = _font_name(j.title_font, j.tspec)
+    lining = "pick a font with lining figures (oswald, outfit)"
+    if oldstyle_figures(font, digits):
+        if not LAYOUT_FEATURES:  # Playfair and Grenze have lining figures, but only raqm layout turns them on
+            lining = "install the FriBiDi library, which Pillow's raqm layout needs to turn on lining figures"
+        warnings.append("%s sets numbers as oldstyle figures (a 1 at x-height, a 9 below the line): %s."
+                        % (name, lining))
+        return
+    alone = [ln for ln in numbered if j.tracking_em > 0 or not any(c.isalpha() for c in ln)]
+    if alone and oldstyle_figures(font, digits, context=False):
+        fix = "set --title-tracking 0" if all(any(c.isalpha() for c in ln) for ln in alone) else lining
+        warnings.append("%s has lining figures only beside letters and untracked, so %s comes out in oldstyle "
+                        "figures (a 1 at x-height, a 9 below the line): %s." % (name, " / ".join(alone), fix))
+
+
+def _check_column(j, items):
+    """Warn when a line of the big type, the label box, the kicker or the subtitle is still wider than the
+    type column at its smallest size (fit_title and fit_small stop there), naming a fix; in a post the fix
+    never drops the user's words. Post body and details wrap and are checked with the post text. Returns the
+    names of the elements warned about."""
+    cv, warnings, post = j.cv, j.info["warnings"], j.mode == "post"
+    done = set()
+    for kind, text, f, trk, _, _, _, _, name in items:
+        if kind == "image" or name in done or name not in (j.big_name, "label box", "kicker", "subtitle"):
+            continue
+        pad = 2 * cv.px(22) if kind == "box" else 0
+        over = text_width(f, text, trk) + pad - j.max_w
+        if over <= 1:
+            continue
+        done.add(name)
+        words = text.split()
+        if name == j.big_name:
+            fix = ("split it over more lines with \\n" if len(words) > 1
+                   else "pick a narrower font (bebas, oswald)")
+        elif post:
+            fix = "move it into --body, which wraps" if name != "label box" else "move it into --details, which wraps"
+        else:
+            fit = max([n for n in range(1, len(words) + 1)
+                       if text_width(f, " ".join(words[:n]), trk) + pad <= j.max_w] or [0])
+            fix = "shorten it to %d word%s" % (fit, "" if fit == 1 else "s") if fit else "shorten it"
+        warnings.append("the %s is %d px wider than the type column even at its smallest size: %s."
+                        % (name, over, fix))
+    return done
 
 
 def _place_band(j):
