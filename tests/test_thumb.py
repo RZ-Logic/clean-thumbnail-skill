@@ -59,7 +59,7 @@ class Source(unittest.TestCase):
 
     def test_background_comes_from_the_image_and_is_near_black(self):
         bg = thumb.dark_tone(Image.new("RGB", (64, 64), (200, 140, 60)))
-        self.assertLessEqual(max(bg), 22)
+        self.assertLessEqual(max(bg), 48)  # lifted off YouTube's dark page, still near black
         self.assertGreater(bg[0], bg[2])  # keeps the warm hue
 
     def test_upscale_warning_for_small_art(self):
@@ -180,7 +180,7 @@ class Roles(unittest.TestCase):
         a, b = grainy(color=(225, 220, 210)), grainy(color=(235, 230, 215))
         for lead in ("title", "label"):
             _, info = thumb.render(None, "GAMING", "Which is faster", panels=[a, b], lead=lead)
-            self.assertLessEqual(info["behind_type"], thumb.MAX_LUMA_BEHIND_TYPE, lead)
+            self.assertLessEqual(info["behind_type"], 0.45, lead)
 
     def test_panels_and_capture_are_exclusive(self):
         with self.assertRaises(ValueError):
@@ -299,7 +299,7 @@ class Contrast(unittest.TestCase):
     def test_bright_frame_gets_darkened_under_the_type(self):
         white = Image.new("RGB", (1920, 1080), (250, 248, 240))
         _, info = thumb.render(white, "SIMON", "Parry only", text_side="left")
-        self.assertLessEqual(info["behind_type"], thumb.MAX_LUMA_BEHIND_TYPE)
+        self.assertLessEqual(info["behind_type"], 0.45)
         self.assertFalse(any("bright" in w for w in info["warnings"]))
 
     def test_warns_when_contrast_cannot_be_fixed(self):
@@ -1565,7 +1565,8 @@ class SubjectBox(unittest.TestCase):
     def test_explicit_side_warns_with_a_crop_that_works(self):
         import re
         img = face_scene()
-        _, info = thumb.render(img, "ONE TAKE", "NO SCRIPT", size="720p", subject_box=FACE, text_side="left")
+        _, info = thumb.render(img, "ONE TAKE", "NO SCRIPT", size="720p", subject_box=FACE, text_side="left",
+                               shade=0.88)
         self.assertEqual(info["text_side"], "left")  # respected, only warned
         w = [x for x in info["warnings"] if "darkens --subject-box" in x]
         self.assertEqual(len(w), 1, info["warnings"])
@@ -1573,7 +1574,7 @@ class SubjectBox(unittest.TestCase):
         self.assertIsNotNone(m, w[0])
         crop = tuple(float(v) for v in m.groups()[:4])
         _, info = thumb.render(img, "ONE TAKE", "NO SCRIPT", size="720p", subject_box=FACE, text_side=m.group(5),
-                               crop=crop)
+                               crop=crop, shade=0.88)
         self.assertFalse(any("--subject-box" in x for x in info["warnings"]), info["warnings"])
         self.assertGreaterEqual(info["subject_box"]["visibility"], 0.9)  # what the suggestion promises
 
