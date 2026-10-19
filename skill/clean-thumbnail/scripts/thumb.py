@@ -58,7 +58,7 @@ BANDS = ("auto", "top", "bottom")  # --band: where the type band goes on 4:5 and
 # --backdrop: what sits behind the type. fade: the photo runs under it, shaded toward the type; solid: the photo
 # keeps its own rectangle and the type sits on an opaque panel of the --bg color, with a hard edge between them.
 BACKDROPS = ("fade", "solid")
-SOLID_IDLE_NOTE = "with --backdrop solid, --shade and --feather have no effect"
+SOLID_IDLE_NOTE = "%s %s no effect with --backdrop solid: the type sits on an opaque panel"  # (settings, has/have)
 COL_SHARE = 0.40  # type column width as a share of the canvas
 MAX_LUMA_BEHIND_TYPE = 0.45  # white type over sRGB 0.45 is about 4.5:1 contrast
 MIN_CONTRAST = 4.5  # WCAG AA for normal text, applied to every element
@@ -999,6 +999,18 @@ def solid_rect(cv, band, anchor, text_side):
     return (edge, 0, cv.w, cv.h) if text_side == "left" else (0, 0, cv.w - edge, cv.h)
 
 
+SOLID_MIN_SEEN = 0.20  # 9:16: the least share of the frame the photo should fill where it is seen (solid_seen)
+
+
+def solid_seen(cv, rect):
+    """9:16: the share of the frame's height the photo rect fills where it is seen both on the Reels/Shorts
+    screen (below the header; the caption only overlays it) and in the 3:4 profile-grid crop (the middle
+    w*4/3 rows)."""
+    grid_h = int(cv.w * 4 / 3)
+    lo, hi = max(cv.h * REELS_SAFE["top"], (cv.h - grid_h) // 2), (cv.h + grid_h) // 2
+    return max(0.0, min(rect[3], hi) - max(rect[1], lo)) / float(cv.h)
+
+
 def solid_region(cv, rect):
     """Where a --subject-box counts as in view with --backdrop solid: the photo rect (on 9:16 also inside
     the Reels/Shorts safe zone); a box in the panel is out of view."""
@@ -1392,13 +1404,14 @@ def fit_logo(logo, max_w, max_h):
 
 # ---------------------------------------------------------------- post text (--body, --details)
 # Every word the user gave is laid out, in order: lines break between words (or at " · " in the details),
-# never inside or instead of one. A word wider than the column stays whole on its own line.
+# never instead of one. A word wider than the column (a link, an email) breaks inside itself only where a link
+# may (word_pieces), with no hyphen added; a part still too wide stays whole on its own line.
 
 def post_paragraphs(text):
     """--body text -> paragraphs, each a list of the lines the user broke ('\\n'); a blank line
     ('\\n\\n') starts a new paragraph."""
     paras, cur = [], []
-    for ln in text.replace("\\n", "\n").replace("\r\n", "\n").split("\n"):
+    for ln in post_newlines(text).replace("\r\n", "\n").split("\n"):
         if ln.strip():
             cur.append(ln.strip())
         elif cur:
@@ -1407,24 +1420,61 @@ def post_paragraphs(text):
     return paras + ([cur] if cur else [])
 
 
-def wrap_words(font, text, max_w):
-    """Greedy word wrap of one line to max_w; returns the lines, every word kept."""
+def post_newlines(text):
+    """Text with each '\\n' the user typed as a line break turned into a real newline. A Windows path keeps its
+    backslashes: a word with a drive (C:\\new) or with any other backslash (C:\\Users\\nina) is drawn as typed."""
+    def is_path(tok):
+        drive = any(tok.startswith(":\\", p) and tok[p - 1].isalpha() and (p == 1 or not tok[p - 2].isalnum())
+                    for p in range(1, len(tok)))
+        return drive or any(c == "\\" and tok[i + 1:i + 2] != "n" for i, c in enumerate(tok))
+    return " ".join(t if is_path(t) else t.replace("\\n", "\n") for t in text.split(" "))
+
+
+POST_BREAKS = "/-_?&="  # where a long word may break: after these (after the last of a run: https:// stays whole)
+
+
+def word_pieces(word):
+    """A word split where a line may break inside it without a hyphen: after / - _ ? & = and before a dot,
+    each only when a letter or digit follows (so https://, '...' and a closing '.' or '?' stay attached).
+    Joined, the pieces are the word."""
+    pieces, cur = [], ""
+    for i, c in enumerate(word):
+        nxt = word[i + 1:i + 2]
+        if cur and c == "." and cur[-1] not in POST_BREAKS + "." and nxt.isalnum():
+            pieces.append(cur)
+            cur = ""
+        cur += c
+        if c in POST_BREAKS and nxt.isalnum():
+            pieces.append(cur)
+            cur = ""
+    return pieces + ([cur] if cur else [])
+
+
+def wrap_words(font, text, max_w, glued=None):
+    """Greedy word wrap of one line to max_w; returns the lines, every word kept. A word wider than max_w
+    breaks at its word_pieces; the index of each line that continues a word (no space before it) is added
+    to `glued` when given."""
     lines, cur = [], ""
     for word in text.split():
-        t = cur + " " + word if cur else word
-        if cur and text_width(font, t, 0) > max_w:
-            lines.append(cur)
-            cur = word
-        else:
-            cur = t
+        pieces = word_pieces(word) if text_width(font, word, 0) > max_w else [word]
+        for k, piece in enumerate(pieces):
+            t = cur + ("" if k else " ") + piece if cur else piece
+            if cur and text_width(font, t, 0) > max_w:
+                lines.append(cur)
+                if k and glued is not None:
+                    glued.append(len(lines))
+                cur = piece
+            else:
+                cur = t
     return lines + ([cur] if cur else [])
 
 
-def wrap_details(font, text, max_w):
+def wrap_details(font, text, max_w, glued=None):
     """--details lines: each line the user broke stays whole when it fits; else it breaks at its
-    " · " separators (the break replaces that dot), and a part still too wide wraps by words."""
+    " · " separators (the break replaces that dot; a dot inside a word, as in Café·Bar, is not one), and a
+    part still too wide wraps by words (wrap_words, which adds to `glued`)."""
     out = []
-    for line in text.replace("\\n", "\n").split("\n"):
+    for line in post_newlines(text).split("\n"):
         line = " ".join(line.split())
         if not line:
             continue
@@ -1432,7 +1482,7 @@ def wrap_details(font, text, max_w):
             out.append(line)
             continue
         cur = ""
-        for part in [p.strip() for p in line.split("·") if p.strip()]:
+        for part in [p.strip() for p in line.split(" · ") if p.strip()]:
             t = cur + " · " + part if cur else part
             if cur and text_width(font, t, 0) > max_w:
                 out.append(cur)
@@ -1441,14 +1491,26 @@ def wrap_details(font, text, max_w):
                 cur = t
         if cur:
             out.append(cur)
-    return [w for ln in out for w in (wrap_words(font, ln, max_w) if text_width(font, ln, 0) > max_w else [ln])]
+    lines = []
+    for ln in out:
+        if text_width(font, ln, 0) > max_w:
+            g = []
+            wrapped = wrap_words(font, ln, max_w, g)
+            if glued is not None:
+                glued.extend(len(lines) + i for i in g)
+            lines.extend(wrapped)
+        else:
+            lines.append(ln)
+    return lines
 
 
 def post_items(lspec, body, details, max_w, body_size, details_size):
     """Body and details as text_block items in the label font, in the order given (the first item's gap is
     the least gap text_block leaves below the headline). Leading is fixed per font (ascender to descender of
-    the face, not of each line), so every line sits at the same pitch. Returns (items, {"body": lines, "details": lines})."""
-    items, log = [], {"body": [], "details": []}
+    the face, not of each line), so every line sits at the same pitch. Returns (items, {"body": lines,
+    "details": lines}, {"body": glued, "details": glued}): glued lists the lines that continue a word
+    broken at the end of the line before (wrap_words)."""
+    items, log, glued = [], {"body": [], "details": []}, {"body": [], "details": []}
 
     def metrics(font):
         return cap_metrics(font, "Hbdfhklt")[0], cap_metrics(font, "gjpqy")[1]
@@ -1457,7 +1519,13 @@ def post_items(lspec, body, details, max_w, body_size, details_size):
         a, d = metrics(f)
         line_gap, para_gap = max(0, int(round(body_size * 1.38)) - a - d), int(round(body_size * 0.55))
         for p, para in enumerate(post_paragraphs(body)):
-            for i, ln in enumerate(w for forced in para for w in wrap_words(f, forced, max_w)):
+            lines = []
+            for forced in para:
+                g = []
+                wrapped = wrap_words(f, forced, max_w, g)
+                glued["body"].extend(len(log["body"]) + len(lines) + i for i in g)
+                lines.extend(wrapped)
+            for i, ln in enumerate(lines):
                 gap = int(round(body_size * 0.8)) if not items else line_gap + (para_gap if i == 0 else 0)
                 items.append(("text", ln, f, 0, a, d, gap, (255, 255, 255, 255), "body"))
                 log["body"].append(ln)
@@ -1465,17 +1533,23 @@ def post_items(lspec, body, details, max_w, body_size, details_size):
         f = load_font(lspec, details_size)
         a, d = metrics(f)
         line_gap = max(0, int(round(details_size * 1.32)) - a - d)
-        for i, ln in enumerate(wrap_details(f, details, max_w)):
+        for i, ln in enumerate(wrap_details(f, details, max_w, glued["details"])):
             gap = (int(round(details_size * 0.8)) if not items
                    else int(round(body_size * 0.95)) if i == 0 else line_gap)
             items.append(("text", ln, f, 0, a, d, gap, (255, 255, 255, 225), "details"))
             log["details"].append(ln)
-    return items, log
+    return items, log, glued
 
 
 def post_words(text):
-    """The words of post text in order, without the " · " separators a line break may replace."""
-    return [w for w in text.replace("\\n", " ").replace("·", " ").split()]
+    """The words of post text in order, without the " · " separators a line break may replace (a dot inside a
+    word stays part of it)."""
+    return [w for w in post_newlines(text).split() if w != "·"]
+
+
+def post_joined(lines, glued=()):
+    """The laid-out lines as one text again: a space between lines, none before a line that continues a word."""
+    return "".join(ln if i in glued else (" " if i else "") + ln for i, ln in enumerate(lines))
 
 
 def text_block(cv, big, box, kicker, subtitle, tspec, lspec, tracking_em, accent,
@@ -2284,7 +2358,10 @@ def _fit_post(j, avail):
     """Post text: the stack at the largest size that fits avail, shrinking the headline first (from j.base to
     POST_BIG_MIN), then the body and details together, half a feed pixel of cap height at a time. Below
     POST_MIN_CAP it keeps shrinking so no word is cut or pushed off the frame (_check_post warns), down to
-    POST_LAST_CAP. Returns what _fit_block returns and records the laid-out text in j.post_fit."""
+    POST_LAST_CAP. The width counts too: a size at which a part of a long word (wrap_words) is still wider
+    than the column doesn't fit, and the headline only starts to shrink at the first size where every part
+    fits. Returns what _fit_block returns and records the laid-out text in j.post_fit ("long": the widest
+    such part at the last size too narrow for it, which set the size)."""
     if j.post_ratio is None:
         j.post_ratio = max(0.3, cap_metrics(load_font(j.lspec, 200), "H")[0] / 200.0)
     caps = [POST_BODY_CAP]
@@ -2293,17 +2370,24 @@ def _fit_post(j, avail):
             caps.append(round(caps[-1] - 0.5, 2))
     big_min = min(j.base, POST_BIG_MIN)
     stack = j.lead == "label" and "·" in j.label
+    start, long_ = None, None
     for n, body_cap in enumerate(caps):
         bs, ds = _post_sizes(j, body_cap)
-        extra, log = post_items(j.lspec, j.body, j.details, j.max_w, bs, ds)
-        cap = j.base if n == 0 else big_min  # once the body shrinks, the room it frees stays with the body
+        extra, log, glued = post_items(j.lspec, j.body, j.details, j.max_w, bs, ds)
+        wide = [w for w in ((text_width(it[2], it[1], 0), it[8], it[1]) for it in extra) if w[0] > j.max_w]
+        if wide and n < len(caps) - 1:  # only a smaller body and details fit a word wider than the column
+            long_ = max(wide)[1:]
+            continue
+        start = n if start is None else start
+        cap = j.base if n == start else big_min  # once the body shrinks, the room it frees stays with the body
         while True:
             items, bw, bh, big_size = text_block(j.cv, j.big, j.box, j.kicker, j.subtitle, j.tspec, j.lspec,
                                                  j.tracking_em, j.accent_rgba, j.logo, j.logo_big, j.max_w,
                                                  stack=stack, max_size=cap, big_name=j.big_name,
                                                  big_color=j.big_rgb + (255,), box_first=True, extra=extra)
             if bh <= avail or (cap <= big_min and n == len(caps) - 1):
-                j.post_fit = {"body_cap": body_cap, "sizes": {"body": bs, "details": ds}, "lines": log}
+                j.post_fit = {"body_cap": body_cap, "sizes": {"body": bs, "details": ds}, "lines": log,
+                              "glued": glued, "long": max(wide)[1:] if wide else long_ if n == start else None}
                 return items, bw, bh, big_size, cap
             if cap <= big_min:
                 break
@@ -2610,11 +2694,30 @@ def _solid_focus(j, rect):
 
 def _solid_layout(j):
     """--backdrop solid: the photo's rectangle beside the type panel and the crop within it (_pick_anchor has
-    already placed it on tall canvases with --subject-box). Sets info["backdrop"] and info["image_rect"]."""
+    already placed it on tall canvases with --subject-box). On 9:16, when a long message leaves the photo above a
+    bottom band less than SOLID_MIN_SEEN of the frame where it is seen (solid_seen: mostly under the Reels
+    header), the band moves to the top and the photo fills the frame below it; when it is still too little,
+    it warns. Sets info["backdrop"] and info["image_rect"]."""
     if j.backdrop != "solid":
         return
     cv, src, info = j.cv, j.src, j.info
     rect = solid_rect(cv, j.band, j.anchor, j.text_side)
+    if cv.reels:
+        seen = solid_seen(cv, rect)
+        if seen < SOLID_MIN_SEEN and j.anchor == "bottom" and not j.band_forced and j.band_scores is None:
+            top, band = tall_band(cv, j.safe, j.bh, "top")
+            up = solid_rect(cv, band, "top", j.text_side)
+            if top + j.bh <= j.safe[3] and solid_seen(cv, up) > seen:
+                info["notes"].append("type band at the top: the photo below it fills %d%% of the frame where the "
+                                     "Reels/Shorts screen and the profile grid show it, %d%% with the band at the "
+                                     "bottom (--band bottom keeps it there)"
+                                     % (round(100 * solid_seen(cv, up)), round(100 * seen)))
+                j.anchor, j.top, j.band, rect, seen = "top", top, band, up, solid_seen(cv, up)
+                info["text_side"] = "top"
+        if seen < SOLID_MIN_SEEN:
+            info["warnings"].append("the photo fills only %d%% of the frame where the Reels/Shorts screen and the "
+                                    "profile grid show it; the type panel takes the rest: use --aspect 4:5, which "
+                                    "leaves the photo more of the frame." % round(100 * seen))
     j.image_rect = rect
     rw, rh = rect[2] - rect[0], rect[3] - rect[1]
     if j.band_scores is None:
@@ -2626,8 +2729,12 @@ def _solid_layout(j):
                                      % j.focus_eff)
     if j.focus_eff is None:  # the busiest window of the capture: where the subject is
         j.focus_eff = subject_focus(src, (rw / max(rw / src.width, rh / src.height)) / src.width)
-    if abs(j.shade - 0.88) > 1e-9 or abs(j.feather - 0.36) > 1e-9:
-        info["notes"].append(SOLID_IDLE_NOTE)
+    # name the setting and its value, not a flag: it may come from the channel file (default: render's or the CLI's)
+    idle = ["%s %.2f" % (key, v) for key, v, dflt in (("shade", j.shade, (Job.shade, DEFAULTS["shade"])),
+                                                      ("feather", j.feather, (Job.feather, DEFAULTS["feather"])))
+            if all(abs(v - d) > 1e-9 for d in dflt)]
+    if idle:
+        info["notes"].append(SOLID_IDLE_NOTE % (" and ".join(idle), "has" if len(idle) == 1 else "have"))
     info["backdrop"] = "solid"
     info["image_rect"] = tuple(int(v) for v in rect)
     info["backdrop_color"] = hexcolor(j.bg)
@@ -2914,9 +3021,12 @@ def _check_subject_box(j):
 
 def _check_post(j):
     """Posts: record the body and details as laid out (info["post_text"]: per slot the font size, cap height
-    at master size and at the phone feed width, and the lines), confirm every word is there in order, and
-    warn when either reads below POST_MIN_CAP at that width, naming the fix. The text is never cut."""
+    at master size and at the phone feed width, the lines, which lines continue a word ("continued") and which
+    run past the column or out of the frame ("overflow")), confirm every word is there in order, check the
+    label font has every character, and warn when either reads below POST_MIN_CAP at that width or doesn't
+    fit, naming the fix. The text is never cut."""
     info, cv, pf = j.info, j.cv, j.post_fit
+    warnings = info["warnings"]
     feed_w = POST_FEED_WIDTH[j.aspect]
     k = feed_w / float(cv.w)
     out = {"feed_width": feed_w, "min_cap": POST_MIN_CAP}
@@ -2924,14 +3034,23 @@ def _check_post(j):
     for name, text in (("body", j.body), ("details", j.details)):
         if not text:
             continue
-        lines = pf["lines"][name]
-        if post_words(" ".join(lines)) != post_words(text):  # wrapping only breaks between words
-            info["warnings"].append("the %s was not laid out word for word (a bug): check the image against the "
-                                    "text." % name)
+        lines, glued = pf["lines"][name], pf["glued"][name]
+        if post_words(post_joined(lines, glued)) != post_words(text):  # wrapping only breaks between words
+            warnings.append("the %s was not laid out word for word (a bug): check the image against the "
+                            "text." % name)
+        missing = missing_glyphs(load_font(j.lspec, 64), post_newlines(text))
+        if missing:
+            warnings.append("the label font, which sets the %s, has no glyph for %s: pick a --label-font that has "
+                            "it (--list-fonts)." % (name, ", ".join("U+%04X" % ord(c) for c in missing)))
         size = pf["sizes"][name]
         cap = cap_metrics(load_font(j.lspec, size), "H")[0]
         feed_cap = cap * k
-        out[name] = {"size": size, "cap": int(cap), "feed_cap": int(feed_cap * 10) / 10.0, "lines": list(lines)}
+        boxes = [b for n, b in j.built["elements"] if n == name]
+        over = [i for i, b in enumerate(boxes) if b[2] - b[0] > j.max_w + 1 or not inside(b, cv.frame_box)]
+        out[name] = {"size": size, "cap": int(cap), "feed_cap": int(feed_cap * 10) / 10.0, "lines": list(lines),
+                     "continued": list(glued), "overflow": over}
+        if over:
+            _post_overflow(j, name, text, lines, boxes)
         if feed_cap < POST_MIN_CAP - 1e-6:
             low.append((name, feed_cap))
     info["post_text"] = out
@@ -2947,10 +3066,83 @@ def _check_post(j):
     elif j.aspect == "9:16":
         fixes.append("use --aspect 4:5, which has more room for text")
     fix = fixes[0] if len(fixes) == 1 else ", ".join(fixes[:-1]) + ", or " + fixes[-1]
+    if pf.get("long"):  # one long word, not the length of the message, set the size
+        name, piece = pf["long"]
+        word = _post_word_of(piece, j.body if name == "body" else j.details)
+        fix = ('"%s" is still wider than the column at that size: %s' if out[name]["overflow"] else
+               'it is set this small so "%s" fits the column: %s') % (word, _post_long_fix(j))
     where = "%d px wide %s" % (feed_w, "Reels/Stories screen" if cv.reels else "phone feed card")
     what = " and ".join("%s %.1f px" % (n, int(c * 10) / 10.0) for n, c in low)
     info["warnings"].append("post text too small to read on a %s: cap height %s, want %.0f px or more: %s. Don't "
                             "cut the user's words to fix it without asking." % (where, what, POST_MIN_CAP, fix))
+
+
+def _post_word_of(piece, text):
+    """The user's word a laid-out piece belongs to (a long word breaks into pieces), shortened to quote."""
+    word = next((w for w in post_words(text) if piece.strip() in w), piece.strip())
+    return word if len(word) <= 60 else word[:57] + "..."
+
+
+def _post_long_fix(j):
+    """The fix for a word too long for the column: the format with the widest column, else a shorter form."""
+    ask = "ask the user to approve a shorter form of it (a short link, say)"
+    return ("use --aspect 4:5, which has the widest column, or " + ask) if j.aspect != "4:5" else ask
+
+
+def _post_overflow(j, name, text, lines, boxes):
+    """Warn about body or details lines past the type column or out of the frame, naming the long word or how
+    many lines are lost and a fix that keeps every word. It takes the place of the frame check's generic
+    "runs outside ...: shorten it." for that slot."""
+    cv, warnings = j.cv, j.info["warnings"]
+    where = ("the Reels/Shorts safe zone (clear of the top 14%, bottom 35%, right 15%)" if cv.reels
+             else "the edge of the frame")
+    wide = [i for i, b in enumerate(boxes) if b[2] - b[0] > j.max_w + 1]
+    off = [b for b in boxes if not inside(b, cv.frame_box)]
+    hidden = [b for b in boxes if b[3] <= 0 or b[1] >= cv.h or b[2] <= 0 or b[0] >= cv.w]
+    smallest = " even at the smallest size" if j.post_fit["body_cap"] <= POST_LAST_CAP + 1e-9 else ""
+    if off:
+        head = "the %s runs outside %s" % (name, where)
+    else:
+        head = "the %s runs past the type column%s" % (
+            name, " into the photo" if j.backdrop == "solid" and not cv.tall else "")
+    parts = []
+    if wide:
+        word = _post_word_of(lines[max(wide, key=lambda i: boxes[i][2] - boxes[i][0])], text)
+        parts.append('"%s" is wider than the column%s' % (word, smallest))
+        fix = _post_long_fix(j)
+    else:
+        fix = ("use --aspect 4:5, which has the most room for text, or " if j.aspect != "4:5" else "") + \
+            "ask the user to approve a shorter version"
+    if hidden:
+        parts.append("all of it falls outside the image and is not shown" if len(hidden) == len(boxes) else
+                     "%d of its %d lines fall outside the image and are not shown" % (len(hidden), len(boxes)))
+    elif off and not wide:
+        parts.append("%d of its %d lines are outside it%s" % (len(off), len(boxes), smallest))
+    msg = "%s: %s: %s; don't cut the user's words without asking." % (head, "; ".join(parts), fix)
+    generic = "the %s runs outside %s: shorten it." % (name, where)
+    if generic in warnings:  # once per line out of frame: the first becomes this warning, the rest go
+        i = warnings.index(generic)
+        warnings[i:] = [msg] + [w for w in warnings[i + 1:] if w != generic]
+    else:
+        warnings.append(msg)
+
+
+def post_report_lines(pt):
+    """The CLI lines after "post text:": each slot's lines as laid out, " | " between lines, " |+ " where a
+    word continues on the next line, and a mark on any line past the column or out of the frame."""
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    rows = []
+    for name in ("body", "details"):
+        if name not in pt:
+            continue
+        s = ""
+        for i, ln in enumerate(pt[name]["lines"]):
+            if i:
+                s += " |+ " if i in pt[name]["continued"] else " | "
+            s += ln + (" [does not fit]" if i in pt[name]["overflow"] else "")
+        rows.append("  %s: %s" % (name, s))
+    # a console that can't show a character gets its escape (→), not a crash after the files are written
+    return [r.encode(enc, "backslashreplace").decode(enc) for r in rows]
 
 
 def _check_result(j):
@@ -3706,6 +3898,8 @@ def main(argv=None):
                 "" if len(pt[n]["lines"]) == 1 else "s") for n in ("body", "details") if n in pt]
             print("post text: %s; reads from %.0f px cap at that width" % ("; ".join(parts) or "headline only",
                                                                          pt["min_cap"]))
+            for row in post_report_lines(pt):
+                print(row)
         print("colors: big type %s; label box %s" % (info["colors"]["big type"], info["colors"]["label box"]))
         if info.get("backdrop") == "solid":
             print("backdrop: solid (panel %s)" % info["backdrop_color"])
