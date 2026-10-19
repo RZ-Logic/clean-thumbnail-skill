@@ -335,10 +335,10 @@ class MirroredSide(unittest.TestCase):
     def test_mirrored_boxes_match_the_real_other_side(self):
         box = (0.62, 0.08, 0.9, 0.2)
         img = scene(1920, 1080, box=box, seed=5)
-        # a stack that fits both sides at one size (465 px tall at 720p): centered on the left (top y 127),
-        # lifted above the duration badge on the right (top y 82)
+        # a stack that fits both sides at one size (about 430 px tall at 720p, with room to spare on every Pillow
+        # CI uses): centered on the left (top y ~145), lifted above the duration badge on the right (top y ~115)
         kw = dict(title="NORTHERN\nLIGHTS\nTONIGHT\nAGAIN", label="NO HUD", kicker="PART ONE",
-                  subtitle="A LONG SUBTITLE", subject_box=box, size="720p", lead="title", style="sans", shade=0.3)
+                  subject_box=box, size="720p", lead="title", style="sans", shade=0.3)
         jobs = []
         orig = thumb._check_subject_box
 
@@ -352,9 +352,11 @@ class MirroredSide(unittest.TestCase):
         finally:
             thumb._check_subject_box = orig
         j = jobs[0]
+        self.assertEqual(left["big_size"], right["big_size"])  # the premise: one size on both sides
         rboxes = [b for n, b in right["elements"]]
         lboxes = [b for n, b in left["elements"]]
         self.assertNotEqual(lboxes[0][1], rboxes[0][1])  # the right side sits higher, above the badge
+        self.assertGreater(right["subject_box"]["under_type"], 0.03)  # and the type reaches the box there
         m = thumb._wide_side(j, "right", 0.5 if j.focus_eff is None else j.focus_eff, j.built["shade"])
         self.assertAlmostEqual(m[3], right["subject_box"]["under_type"], delta=0.01)
 

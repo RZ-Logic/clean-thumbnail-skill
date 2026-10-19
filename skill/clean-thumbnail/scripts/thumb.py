@@ -3223,7 +3223,9 @@ def _under_type(rect, boxes, cv):
 def _wide_side(j, side, focus, shade):
     """--subject-box with the 16:9 type on `side` and the crop at `focus`, without rendering: (inside, visibility,
     heavy, share under the type, type over the inset?). The drawn type is mirrored for the other side, and moved
-    to where _place_band puts it there (on the right it stays above the duration badge)."""
+    to where _place_band puts it there (on the right it stays above the duration badge). It keeps this side's
+    type size: when the other side would fit the stack smaller, the share under the type comes out a little high,
+    and the side or crop it suggests is confirmed by a re-run (_rerun)."""
     cv = j.cv
     mapper, vis = wide_view(j.src, cv, side, focus, j.feather, shade, j.cropped)
     rect = box_rect(j.subject_box, mapper)

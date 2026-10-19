@@ -621,7 +621,8 @@ class ReviewInputs(unittest.TestCase):
         self.assertEqual(thumb.trim_bars(img).size, (1920, 1080))
 
     def test_sixteen_bit_and_transparent_backgrounds(self):
-        g = Image.fromarray((np.full((720, 1280), 30000, np.uint16)), "I;16")
+        g = Image.fromarray(np.full((720, 1280), 30000, np.uint16))  # Pillow 13 rejects an explicit mode here
+        self.assertEqual(g.mode, "I;16")
         rgb16 = thumb.to_rgb(g)
         self.assertLess(abs(float(np.asarray(rgb16).mean()) - 30000 / 257), 2)  # rescaled, not clipped white
         rgba = Image.new("RGBA", (1280, 720), (255, 255, 255, 0))  # hidden white under transparency

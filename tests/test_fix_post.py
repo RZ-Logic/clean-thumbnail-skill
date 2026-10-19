@@ -129,7 +129,9 @@ class LongWords(unittest.TestCase):
         _, info = thumb.render(dark(), "Saturday Cupping", mode="post", body="Use code %s at the till." % word,
                                aspect="9:16")
         self.assertEqual(info["post_text"]["body"]["overflow"], [])
-        self.assertIn(word, info["post_text"]["body"]["lines"])
+        # whole on one line (whether " at" fits beside it depends on the Pillow/FreeType metrics)
+        self.assertTrue(any(word in ln.split() for ln in info["post_text"]["body"]["lines"]),
+                        info["post_text"]["body"]["lines"])
         small = [x for x in info["warnings"] if x.startswith("post text too small")]
         self.assertEqual(len(small), 1, info["warnings"])
         self.assertIn('it is set this small so "%s" fits the column: use --aspect 4:5' % word, small[0])
