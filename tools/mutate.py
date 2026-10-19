@@ -312,15 +312,20 @@ MUTANTS = [
     ("inner trim accepts a standard shape", "(not pristine_only and (common(cw, h - top - bottom) or common(cw, h)))",
      "(common(cw, h - top - bottom) or common(cw, h))", "Crop.test_bars_inside_the_crop_are_trimmed"),
     # ---------------------------------------------------------------- v0.9.1 text (tests/test_fix_text.py)
+    # A line break in a one-line element: Pillow 12 draws it as a glyph, Pillow 13's raqm raises RuntimeError
+    # (raqm_layout() failed). Either is the old bug, so these three count the RuntimeError as caught.
     ("type-color-1: typed \\n reaches the label box", "small(one_line(title)), False", "small(title), False",
-     "test_fix_text.LineBreaks.test_title_with_a_line_break_reads_as_words_in_the_label_box"),
+     "test_fix_text.LineBreaks.test_title_with_a_line_break_reads_as_words_in_the_label_box",
+     {"errors": ("RuntimeError",)}),
     ("type-color-1: label's \\n reaches the box", "small(one_line(label)), True", "small(label), True",
-     "test_fix_text.LineBreaks.test_label_with_a_line_break_splits_the_hook_and_joins_in_the_box"),
+     "test_fix_text.LineBreaks.test_label_with_a_line_break_splits_the_hook_and_joins_in_the_box",
+     {"errors": ("RuntimeError",)}),
     ("type-color-1: typed \\n stays text", r'''unicodedata.normalize("NFC", t or "").replace("\\n", "\n").replace("\r\n", "\n")''',
      r'''unicodedata.normalize("NFC", t or "").replace("\r\n", "\n")''',
      "test_fix_text.LineBreaks.test_label_with_a_line_break_splits_the_hook_and_joins_in_the_box"),
     ("type-color-1: kicker keeps its line break", "    kicker, subtitle = one_line(kicker), one_line(subtitle)\n",
-     "", "test_fix_text.LineBreaks.test_kicker_subtitle_and_panel_labels_join_their_lines"),
+     "", "test_fix_text.LineBreaks.test_kicker_subtitle_and_panel_labels_join_their_lines",
+     {"errors": ("RuntimeError",)}),
     ("type-color-1: panel labels keep their breaks", 'panel_labels = [one_line(unicodedata.normalize("NFC", p or "")) for p',
      'panel_labels = [(unicodedata.normalize("NFC", p or "")) for p',
      "test_fix_text.LineBreaks.test_kicker_subtitle_and_panel_labels_join_their_lines"),
