@@ -30,12 +30,14 @@ Requires numpy and Pillow.
 """
 import argparse
 from dataclasses import dataclass, field
+import hashlib
 import io
 import json
 import os
 import tempfile
 import unicodedata
 import sys
+from xml.etree import ElementTree
 
 import numpy as np
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFile, ImageFilter, ImageFont, ImageOps
@@ -1121,6 +1123,280 @@ def vfocus_on(box, src, cv):
     return float(min(max(sy / (src.height - ch), 0.0), 1.0))
 
 
+# ---------------------------------------------------------------- face finder (no --subject-box)
+# Without a box, the 16:9 side and the 4:5 and 9:16 crops follow busyness, which can't tell a person from a hay cart.
+# find_faces looks for a face so the check can warn (_check_found_faces): OpenCV's frontal face cascade
+# (haarcascade_frontalface_alt2.xml by Rainer Lienhart, in ../models with its Intel open-source license) run in
+# numpy, so no new dependency. The capture is scanned at FACE_SHORT px on its short side for faces of FACE_MIN_PX
+# and up, only where the cheeks are mostly skin-colored and the eye band is darker than the cheeks; each candidate
+# is then re-scanned densely around its center, at two sizes and mirrored (FACE_PASSES), and kept only when at least
+# FACE_MIN_HITS windows pass the whole cascade in every pass. Sand, wood, rock and cloud that pass once by chance
+# don't pass four times: on 42 labeled game captures, demo photos and scenery crops it found 15 of 19 faces (every
+# Black Flag Edward) with no false alarms.
+FACE_MODEL = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "models",
+                                           "haarcascade_frontalface_alt2.xml"))
+FACE_SHORT, FACE_MIN_PX, FACE_SCALE, FACE_MAX = 720, 28, 1.1, 0.8  # scan size, smallest face (px), level step, largest
+FACE_PIXELS = 2 * 1280 * 720  # and at most this many px (twice a 720p frame): a panorama is scanned smaller
+FACE_SKIN, FACE_EYES = 0.5, 2.0  # skin share of a window's cheeks; how much darker its eye band (of 255, equalized)
+FACE_COARSE_STAGES, FACE_CANDIDATES = 16, 16  # candidates pass 16 of the cascade's 20 stages; at most 16 re-scanned
+FACE_PASSES = ((40, False), (40, True), (60, False), (60, True))  # re-scan: the face's size in px, mirrored
+FACE_MIN_HITS = 18  # faces passed 23 to 88 windows per pass, scenery at most 12
+# _check_found_faces warns, as for --subject-box, when less than FACE_IN_FRAME of a face is in frame, when its
+# visibility is under FACE_SHADE_VIS or more than FACE_SHADE_HEAVY of it is under heavy shade, or when type covers it;
+# and when a crop the script placed (no --focus) cuts more than FACE_CUT face widths off the person: the shoulders,
+# taken as FACE_SHOULDERS face widths to each side of the face's center (the box is the face, not the head)
+FACE_IN_FRAME, FACE_SHADE_VIS, FACE_SHADE_HEAVY = 0.9, 0.7, 0.2
+FACE_SHOULDERS, FACE_CUT = 2.5, 0.25
+_face_model = None
+_face_cache = []  # [(picture key, faces)] of the last few pictures: variants, formats and re-runs look once
+
+
+def face_cascade():
+    """The cascade as [(stage threshold, [(nodes, leaf values)])]; a node is (left, right, rects, threshold), its
+    rects [(x, y, w, h, weight)] in the 20x20 window, and a left or right <= 0 the leaf -value. None without the
+    model file."""
+    global _face_model
+    if _face_model is None:
+        try:
+            root = ElementTree.parse(FACE_MODEL).getroot().find("cascade")
+        except (OSError, ElementTree.ParseError):
+            return None
+        feats = [[tuple(int(v) for v in r.text.split()[:4]) + (float(r.text.split()[4]),) for r in f.find("rects")]
+                 for f in root.find("features")]
+        stages = []
+        for s in root.find("stages"):
+            weaks = []
+            for wk in s.find("weakClassifiers"):
+                n = wk.find("internalNodes").text.split()
+                nodes = [(int(n[i]), int(n[i + 1]), feats[int(n[i + 2])], np.float32(n[i + 3]))
+                         for i in range(0, len(n), 4)]
+                weaks.append((nodes, np.array(wk.find("leafValues").text.split(), dtype=np.float32)))
+            stages.append((np.float32(s.find("stageThreshold").text), weaks))
+        _face_model = stages
+    return _face_model
+
+
+def equalize(gray):
+    """Histogram equalization of a uint8 array, as OpenCV's equalizeHist (the cascade's input)."""
+    hist = np.bincount(gray.ravel(), minlength=256)
+    lo = int(np.argmax(hist > 0))
+    if hist[lo] == gray.size:
+        return gray
+    lut = np.zeros(256)
+    lut[lo + 1:] = np.cumsum(hist[lo + 1:]) * (255.0 / (gray.size - hist[lo]))
+    return np.clip(np.round(lut), 0, 255).astype(np.uint8)[gray]
+
+
+def resize_linear(a, w, h):
+    """Bilinear resize of a uint8 array without antialiasing, like OpenCV's INTER_LINEAR: the cascade's own pyramid.
+    (Pillow's bilinear filter widens as it shrinks, and the softer levels hide faces the cascade finds.)"""
+    sh, sw = a.shape
+    x = (np.arange(w) + 0.5) * (sw / float(w)) - 0.5
+    y = (np.arange(h) + 0.5) * (sh / float(h)) - 0.5
+    x0, y0 = np.clip(np.floor(x).astype(int), 0, sw - 1), np.clip(np.floor(y).astype(int), 0, sh - 1)
+    x1, y1 = np.minimum(x0 + 1, sw - 1), np.minimum(y0 + 1, sh - 1)
+    ax = np.clip(x - x0, 0, 1).astype(np.float32)[None, :]
+    ay = np.clip(y - y0, 0, 1).astype(np.float32)[:, None]
+    a = a.astype(np.float32)
+    top = a[y0][:, x0] * (1 - ax) + a[y0][:, x1] * ax
+    bottom = a[y1][:, x0] * (1 - ax) + a[y1][:, x1] * ax
+    return np.clip(np.round(top * (1 - ay) + bottom * ay), 0, 255).astype(np.uint8)
+
+
+def integral(a):
+    """Summed-area table with a zero first row and column (int64)."""
+    s = np.zeros((a.shape[0] + 1, a.shape[1] + 1), np.int64)
+    s[1:, 1:] = a.astype(np.int64).cumsum(0).cumsum(1)
+    return s
+
+
+class FaceWindows:
+    """20x20 windows of several pyramid levels, run through the cascade together: the levels' integral images are
+    stacked with one row stride, so each rect corner is a fixed offset from a window's origin."""
+
+    def __init__(self, stride):
+        self.stride, self.rows, self.blocks = stride, 0, []
+        self.origins, self.norms, self.levels = [], [], []
+
+    def add(self, level, ys, xs, tag):
+        """level: a uint8 array; ys, xs: window origins in it; tag: returned with each of them that passes."""
+        h, w = level.shape
+        ii = np.zeros((h + 1, self.stride), np.int64)
+        ii[:, :w + 1] = integral(level)
+        ii[:, w + 1:] = ii[:, w:w + 1]
+        if len(ys):  # OpenCV's variance normalization, over the window's inner 18x18
+            sq = integral(level.astype(np.int64) ** 2).astype(np.float64)
+            s = (ii[ys + 19, xs + 19] - ii[ys + 1, xs + 19] - ii[ys + 19, xs + 1]
+                 + ii[ys + 1, xs + 1]).astype(np.float64)
+            q = sq[ys + 19, xs + 19] - sq[ys + 1, xs + 19] - sq[ys + 19, xs + 1] + sq[ys + 1, xs + 1]
+            n = 324.0 * q - s * s
+            self.norms.append(np.where(n > 0, np.sqrt(np.maximum(n, 0)), 1.0).astype(np.float32))
+            self.origins.append((self.rows + ys) * self.stride + xs)
+            self.levels.append((tag, ys, xs))
+        self.blocks.append(ii.astype(np.int32))  # a 1280x720 level sums to under 2**31
+        self.rows += h + 1
+
+    def passing(self, stages=None):
+        """(tag, y, x) of the windows that pass the cascade's first `stages` stages (all by default)."""
+        if not self.origins:
+            return []
+        ii, S = np.concatenate(self.blocks).ravel(), self.stride
+        org, norm = np.concatenate(self.origins), np.concatenate(self.norms)
+        alive = np.arange(len(org))
+        for threshold, weaks in face_cascade()[:stages]:
+            o, n = org[alive], norm[alive]
+            every = np.arange(len(alive))
+            total = np.zeros(len(alive), np.float32)
+            for nodes, leaves in weaks:
+                leaf = np.zeros(len(alive), np.int64)
+                todo = [(0, every)]
+                while todo:
+                    k, idx = todo.pop()
+                    left, right, rects, t = nodes[k]
+                    oi = o[idx]
+                    v = np.zeros(len(idx), np.float32)
+                    for x, y, w, h, weight in rects:
+                        v += np.float32(weight) * (ii[oi + ((y + h) * S + x + w)] - ii[oi + (y * S + x + w)]
+                                                   - ii[oi + ((y + h) * S + x)] + ii[oi + (y * S + x)])
+                    go = v < t * n[idx]
+                    for branch, sel in ((left, idx[go]), (right, idx[~go])):
+                        if branch <= 0:
+                            leaf[sel] = -branch
+                        elif len(sel):
+                            todo.append((branch, sel))
+                total += leaves[leaf]
+            alive = alive[total >= threshold]
+            if not len(alive):
+                break
+        ends = np.cumsum([len(o) for o in self.origins])
+        out = []
+        for i in alive:
+            lv = int(np.searchsorted(ends, i, side="right"))
+            tag, ys, xs = self.levels[lv]
+            j = i - (ends[lv - 1] if lv else 0)
+            out.append((tag, int(ys[j]), int(xs[j])))
+        return out
+
+
+def group_windows(rects, eps=0.2):
+    """OpenCV's groupRectangles clustering of (x, y, w, h) windows: [(mean window, count)], most windows first."""
+    parent = list(range(len(rects)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, a in enumerate(rects):
+        for j in range(i + 1, len(rects)):
+            b = rects[j]
+            d = eps * (min(a[2], b[2]) + min(a[3], b[3])) * 0.5
+            if (abs(a[0] - b[0]) <= d and abs(a[1] - b[1]) <= d and abs(a[0] + a[2] - b[0] - b[2]) <= d
+                    and abs(a[1] + a[3] - b[1] - b[3]) <= d):
+                parent[root(j)] = root(i)
+    groups = {}
+    for i, r in enumerate(rects):
+        groups.setdefault(root(i), []).append(r)
+    out = [(tuple(float(v) for v in np.mean(np.asarray(g, np.float64), axis=0)), len(g)) for g in groups.values()]
+    return sorted(out, key=lambda c: (-c[1], c[0]))
+
+
+def skin_tone(rgb):
+    """Skin-colored pixels of an RGB array: a wide YCbCr box that sand, wood and orange rock pass too (the cascade
+    tells them apart); it only spares the cascade the sky, foliage, walls and shadows."""
+    a = rgb.astype(np.float32)
+    cb = 128 - 0.168736 * a[..., 0] - 0.331264 * a[..., 1] + 0.5 * a[..., 2]
+    cr = 128 + 0.5 * a[..., 0] - 0.418688 * a[..., 1] - 0.081312 * a[..., 2]
+    return (cr > 135) & (cr < 182) & (cb > 82) & (cb < 130) & (a @ REC601 > 20)
+
+
+def box_iou(a, b):
+    """Intersection over union of two boxes."""
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - iw * ih
+    return iw * ih / u if u > 0 else 0.0
+
+
+def find_faces(img):
+    """Faces in img as [{"box": (x0, y0, x1, y1) fractions of img, about the brows to the chin, "hits": windows
+    that passed}], largest first; [] when there are none or the model file is missing. Deterministic; the last few
+    pictures are cached."""
+    W0, H0 = img.size
+    k = min(1.0, FACE_SHORT / float(min(W0, H0)), (FACE_PIXELS / float(W0 * H0)) ** 0.5)
+    W, H = int(round(W0 * k)), int(round(H0 * k))
+    if min(W, H) < FACE_MIN_PX or face_cascade() is None:
+        return []
+    small = img.convert("RGB")
+    small = small.resize((W, H), Image.BOX) if small.size != (W, H) else small
+    key = (img.size, hashlib.sha256(small.tobytes()).hexdigest())
+    for seen, faces in _face_cache:
+        if seen == key:
+            return [dict(f) for f in faces]
+    gray = equalize(np.asarray(small.convert("L")))
+    skin, lum = integral(skin_tone(np.asarray(small))), integral(gray)
+
+    def mean(ii, xs, ys, win, fx0, fy0, fx1, fy1):  # per window, over that part of it
+        x0, x1 = (np.clip(np.round(xs + v * win).astype(int), 0, W) for v in (fx0, fx1))
+        y0, y1 = (np.clip(np.round(ys + v * win).astype(int), 0, H) for v in (fy0, fy1))
+        return (ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]) / np.maximum(1.0, (x1 - x0) * (y1 - y0))
+    # coarse pass: windows every 2 px of each level, where the cheeks are skin-colored and the eye band darker
+    coarse = FaceWindows(W + 1)
+    f = FACE_MIN_PX / 20.0
+    while 20 * f <= FACE_MAX * min(W, H):
+        lw, lh = int(round(W / f)), int(round(H / f))
+        ys, xs = (g.ravel() for g in np.mgrid[0:lh - 19:2, 0:lw - 19:2])
+        ok = mean(skin, xs * f, ys * f, 20 * f, 0.25, 0.35, 0.75, 0.85) >= FACE_SKIN
+        ys, xs = ys[ok], xs[ok]
+        ok = (mean(lum, xs * f, ys * f, 20 * f, 0.15, 0.2, 0.85, 0.45)
+              <= mean(lum, xs * f, ys * f, 20 * f, 0.15, 0.5, 0.85, 0.75) - FACE_EYES)
+        if ok.any():
+            coarse.add(resize_linear(gray, lw, lh), ys[ok], xs[ok], f)
+        f *= FACE_SCALE
+    found = group_windows([(x * f, y * f, 20 * f, 20 * f) for f, y, x in coarse.passing(FACE_COARSE_STAGES)])
+    candidates = [r for r, _ in found[:FACE_CANDIDATES]]
+    # re-scan each candidate from the full picture: every px, 1.05x apart, 0.7x to 1.4x its size, centered near its
+    # center, through all 20 stages, once per FACE_PASSES; a candidate keeps its fewest passing windows
+    full = img.convert("L")
+    hits, boxes, live = [None] * len(candidates), {}, list(range(len(candidates)))
+    for size, mirror in FACE_PASSES:
+        pad = int(round(size * 1.1))
+        side = 2 * pad + 1
+        dense = FaceWindows(side + 1)
+        for c in live:
+            x, y, w, _ = candidates[c]
+            s = size / (w / k)  # crop px per picture px
+            ox, oy = (x + w / 2) / k - pad / s, (y + w / 2) / k - pad / s
+            crop = full.crop(tuple(int(round(v)) for v in (ox, oy, ox + 2 * pad / s, oy + 2 * pad / s)))
+            a = equalize(np.asarray(crop.resize((side, side), Image.BOX)))
+            a = a[:, ::-1] if mirror else a
+            f = 0.7 * size / 20.0
+            while f <= 1.4 * size / 20.0:
+                lw = int(round(side / f))
+                ys, xs = (g.ravel() for g in np.mgrid[0:lw - 19, 0:lw - 19])
+                near = ((np.abs((xs + 10) * f - side / 2.0) < 0.3 * size)
+                        & (np.abs((ys + 10) * f - side / 2.0) < 0.3 * size))
+                dense.add(resize_linear(a, lw, lw), ys[near], xs[near], (c, f, ox, oy, s))
+                f *= 1.05
+        count = dict.fromkeys(live, 0)
+        for (c, f, ox, oy, s), y, x in dense.passing():
+            count[c] += 1
+            if (size, mirror) == FACE_PASSES[0]:  # the windows that pass mark the face's box
+                boxes.setdefault(c, []).append((ox + x * f / s, oy + y * f / s, 20 * f / s))
+        for c in live:
+            hits[c] = count[c] if hits[c] is None else min(hits[c], count[c])
+        live = [c for c in live if hits[c] >= FACE_MIN_HITS]
+    faces = []
+    for c in sorted(live, key=lambda c: -hits[c]):
+        x, y, w = np.mean(np.asarray(boxes[c], np.float64), axis=0)
+        box = tuple(round(float(v), 4) for v in (x / W0, y / H0, (x + w) / W0, (y + w) / H0))
+        if all(box_iou(box, g["box"]) < 0.3 for g in faces):
+            faces.append({"box": box, "hits": int(hits[c])})
+    faces.sort(key=lambda g: -(g["box"][2] - g["box"][0]) * (g["box"][3] - g["box"][1]))
+    _face_cache[:] = [(key, faces)] + _face_cache[:3]
+    return [dict(f) for f in faces]
+
+
 # ---------------------------------------------------------------- solid backdrop (--backdrop solid)
 # The photo keeps its own rectangle, cover-cropped and unshaded; the type sits on an opaque panel of the
 # --bg color with a hard straight edge between them.
@@ -2117,6 +2393,7 @@ class Job:
     shade_auto: bool = False  # --shade not given: _compose picks the lightest shade that reads (_auto_shade)
     unshaded: tuple = None  # set by _backdrop: the single image composed once, before any shade (see there)
     label_caps: bool = True  # set by _assign_roles: the label font's small lines go in caps (catalog "caps")
+    face_check: bool = True  # --no-face-check: False skips _check_found_faces
 
 
 def _check_args(j):
@@ -3175,14 +3452,15 @@ def _auto_shade(j):
 
 
 def _check_feed(j):
-    """How the picture sits in a feed. Hands the preview the --subject-box and --inset-box rects to outline (the
-    canvas's info["boxes"], canvas px; Image.convert copies it to the thumbnail render returns). On 16:9
-    thumbnails, notes the type the duration badge covers on the preview's 120 px tile (Canvas.timestamp_zone keeps
+    """How the picture sits in a feed. Hands the preview the --subject-box and --inset-box rects, and a face the
+    script warned about, to outline (the canvas's info["boxes"], canvas px; Image.convert copies it to the
+    thumbnail render returns). On 16:9 thumbnails, notes the type the duration badge covers on the preview's 120 px tile (Canvas.timestamp_zone keeps
     it clear from the 168 px tile up), and an explicit --bg so dark that most of the edge disappears into
     YouTube's dark-theme page."""
     cv, built, info = j.cv, j.built, j.info
     boxes = [(n, tuple(int(round(v)) for v in r)) for n, r in (
         ("subject box", (info.get("subject_box") or {}).get("rect")), ("inset box", info.get("inset_rect"))) if r]
+    boxes += [("face found", f["rect"]) for f in info.get("faces", []) if f["outlined"]]
     if boxes:
         built["canvas"].info["boxes"] = boxes
     if cv.tall or j.mode == "post":
@@ -3552,16 +3830,15 @@ def _tall_crop_fix(j):
     return None
 
 
-def _check_subject_box(j):
-    """Where --subject-box landed in the finished picture: in frame (Reels: the safe zone), under the
-    shade, under the type. Each problem gets a warning that names its fix (one fix when the shade and the
-    type both hit it): 16:9 tries --focus, a computed --crop or the other side; 4:5 and 9:16 the other
-    --band, then a computed --crop that a re-run confirms. Measurements go in info["subject_box"]."""
-    if j.subject_box is None:
-        return
-    cv, built, info = j.cv, j.built, j.info
-    warnings = info["warnings"]
-    rect = box_rect(j.subject_box, built["mapper"])
+def _box_view(j, box):
+    """Where a box (fractions of the kept background) landed in the finished picture, as _check_subject_box and
+    _check_found_faces judge it: a dict of its rect (canvas px), px (the part shown, clipped to the canvas and,
+    with --backdrop solid, to the photo), region (the frame it should stay in), vis_x and vis_y, inside (its
+    share in that region), vis and heavy (its visibility and share under heavy shade), glyphs and under_type,
+    and shade_vis and shade_heavy, the same over the rows whose shade counts (above: on 9:16, only the rows
+    above the caption area; _shade_judged)."""
+    cv, built = j.cv, j.built
+    rect = box_rect(box, built["mapper"])
     solid = j.backdrop == "solid"
     ir = j.image_rect
     if solid:  # no shade: visibility is the share in the photo rect; a box in the panel is out of view
@@ -3582,6 +3859,31 @@ def _check_subject_box(j):
     if x1 > x0 and y1 > y0:
         glyphs = float((np.asarray(built["layer"].getchannel("A"))[y0:y1, x0:x1] > 128).mean())
     under_type = _under_type(shown, [b for _, b in built["elements"]], cv) if x1 > x0 and y1 > y0 else 0.0
+    # a solid backdrop shades nothing: a box reaching into the panel is out of view, warned about above
+    judged = None if solid or not (x1 > x0 and y1 > y0) else _shade_judged(rect, cv, j.band, j.anchor)
+    above = not solid and judged is not rect  # 9:16: only the rows above the caption area count (none: no shade)
+    shade_vis, shade_heavy = vis, heavy
+    if above:
+        shade_vis, shade_heavy = box_cover(judged, cv, vis_x, vis_y)[1:] if judged is not None else (1.0, 0.0)
+    return {"rect": rect, "px": (x0, y0, x1, y1), "region": region, "vis_x": vis_x, "vis_y": vis_y,
+            "inside": inside, "vis": vis, "heavy": heavy, "glyphs": glyphs, "under_type": under_type,
+            "above": above, "shade_vis": shade_vis, "shade_heavy": shade_heavy}
+
+
+def _check_subject_box(j):
+    """Where --subject-box landed in the finished picture: in frame (Reels: the safe zone), under the
+    shade, under the type. Each problem gets a warning that names its fix (one fix when the shade and the
+    type both hit it): 16:9 tries --focus, a computed --crop or the other side; 4:5 and 9:16 the other
+    --band, then a computed --crop that a re-run confirms. Measurements go in info["subject_box"]."""
+    if j.subject_box is None:
+        return
+    cv, info = j.cv, j.info
+    warnings = info["warnings"]
+    solid = j.backdrop == "solid"
+    view = _box_view(j, j.subject_box)
+    rect, region, inside, vis, heavy = (view[k] for k in ("rect", "region", "inside", "vis", "heavy"))
+    glyphs, under_type, above = view["glyphs"], view["under_type"], view["above"]
+    x0, y0, x1, y1 = view["px"]
     info["subject_box"] = {"box": tuple(round(v, 4) for v in j.subject_box),
                            "rect": tuple(int(round(v)) for v in rect), "inside": round(inside, 3),
                            "visibility": round(vis, 3), "heavy": round(heavy, 3), "glyphs": round(glyphs, 3),
@@ -3627,11 +3929,7 @@ def _check_subject_box(j):
             fix = _focus_fix(j) or "check --focus and --crop"
         warnings.append("only %d%% of --subject-box is %s: %s."  # the same number as the 'subject box:' line
                         % (round(100 * info["subject_box"]["inside"]), where, fix))
-    # a solid backdrop shades nothing: a box reaching into the panel is out of view, warned about above
-    judged = None if solid or not (x1 > x0 and y1 > y0) else _shade_judged(rect, cv, j.band, j.anchor)
-    above = not solid and judged is not rect  # 9:16: only the rows above the caption area count (none: no shade)
-    if above:
-        vis, heavy = box_cover(judged, cv, vis_x, vis_y)[1:] if judged is not None else (1.0, 0.0)
+    vis, heavy = view["shade_vis"], view["shade_heavy"]
     shade_bad = not solid and x1 > x0 and y1 > y0 and (vis < 0.7 or heavy > 0.2)
     overlap_bad = glyphs > 0.02 or under_type > 0.10
     if not (shade_bad or overlap_bad):
@@ -3655,6 +3953,91 @@ def _check_subject_box(j):
             " above the caption area" if above else "", shade_fix))
     if overlap_bad:
         warnings.append("the type overlaps --subject-box on %s: %s." % (j.aspect, overlap_fix))
+
+
+def _box_arg(box):
+    """A box as --subject-box takes it, rounded outward to 3 decimals."""
+    lo = [np.floor(v * 1000 + 1e-6) / 1000 for v in box[:2]]
+    hi = [np.ceil(v * 1000 - 1e-6) / 1000 for v in box[2:]]
+    return ",".join(("%.3f" % v).rstrip("0").rstrip(".") for v in lo + hi)
+
+
+def _crop_edge(j, view):
+    """The side ("left" or "right") where a crop the script placed (no --focus) cuts the person around a face
+    (view: _box_view of the face) by more than FACE_CUT face widths, the person spanning FACE_SHOULDERS face widths
+    to each side of the face's center as far as the capture goes; None when it doesn't (or the face is out of frame,
+    which the in-frame check reports)."""
+    if j.focus is not None:
+        return None
+    rect, mapper = view["rect"], j.built["mapper"]
+    x0, x1 = (j.image_rect[0], j.image_rect[2]) if j.backdrop == "solid" else (0, j.cv.w)
+    width, cx = rect[2] - rect[0], (rect[0] + rect[2]) / 2.0
+    if width <= 0 or not x0 <= cx <= x1:
+        return None
+    left, right = mapper(0, 0)[0], mapper(1, 0)[0]  # the capture's own edges, on the canvas
+    if x0 - max(left, cx - FACE_SHOULDERS * width) > FACE_CUT * width:
+        return "left"
+    if min(right, cx + FACE_SHOULDERS * width) - x1 > FACE_CUT * width:
+        return "right"
+    return None
+
+
+def _check_found_faces(j):
+    """No --subject-box on a single capture without --subject: look for a face (find_faces) and measure each one
+    found like --subject-box (_box_view). The check moves nothing. The largest face that the crop cuts (Reels: out
+    of the safe zone; _crop_edge: through the person), the shade darkens or the type covers gets a warning with the
+    --subject-box that marks it, and the preview's boxes tile outlines it ("face found") when it is on the canvas; a
+    face that stays clear gets a note with its box. info["faces"]: each face found, where it landed, and whether it
+    was warned about and outlined. face_check=False (--no-face-check) skips the check."""
+    if not j.face_check or j.subject_box_given is not None or j.layout != "single" or j.subjects:
+        return
+    cv, info = j.cv, j.info
+    info["faces"] = []
+    solid = j.backdrop == "solid"
+    for face in find_faces(j.src_given):
+        b = remap_box(face["box"], j.given_size, j.kept_px)
+        c = tuple(min(max(v, 0.0), 1.0) for v in b)
+        if max(0.0, c[2] - c[0]) * max(0.0, c[3] - c[1]) < 0.5 * (b[2] - b[0]) * (b[3] - b[1]):
+            continue  # --crop (or a bar) cut it away: that crop was asked for
+        view = _box_view(j, c)
+        x0, y0, x1, y1 = view["px"]
+        cut = view["inside"] < FACE_IN_FRAME
+        shaded = (not solid and x1 > x0 and y1 > y0
+                  and (view["shade_vis"] < FACE_SHADE_VIS or view["shade_heavy"] > FACE_SHADE_HEAVY))
+        covered = view["glyphs"] > 0.02 or view["under_type"] > 0.10
+        side = _crop_edge(j, view)
+        edged = side is not None
+        warn = (cut or shaded or covered or edged) and not any(f["warned"] for f in info["faces"])
+        outlined = warn and x1 > x0 and y1 > y0  # a face cropped out of the picture has nothing to outline
+        fb = face["box"]
+        info["faces"].append({"box": fb, "hits": face["hits"],
+                              "rect": tuple(int(round(v)) for v in view["rect"]), "inside": round(view["inside"], 3),
+                              "visibility": round(view["shade_vis"], 3), "heavy": round(view["shade_heavy"], 3),
+                              "under_type": round(min(1.0, max(view["glyphs"], view["under_type"])), 3),
+                              "warned": warn, "outlined": outlined})
+        at = "x %.2f-%.2f, y %.2f-%.2f of the capture" % (fb[0], fb[2], fb[1], fb[3])
+        fix = "pass --subject-box %s%s, so the %s" % (
+            _box_arg(fb), " (the preview's last tile outlines it)" if outlined else "",
+            "type keeps clear of it" if covered or shaded
+            else "crop centers it" if cv.tall else "crop keeps it in frame")
+        if warn and covered:
+            info["warnings"].append("the type overlaps a face the script found on %s (%s): %s." % (j.aspect, at, fix))
+        elif warn and shaded:
+            info["warnings"].append("the type %s darkens a face the script found on %s (%s; %d%% under heavy shade, "
+                                    "%d%% visible%s): %s." % (
+                                        "band" if cv.tall else "shade", j.aspect, at, round(100 * view["shade_heavy"]),
+                                        round(100 * view["shade_vis"]),
+                                        " above the caption area" if view["above"] else "", fix))
+        elif warn and cut:
+            info["warnings"].append("only %d%% of a face the script found (%s) is %s: %s." % (
+                round(100 * view["inside"]), at, "inside the Reels/Shorts safe zone" if cv.reels
+                else "in the photo" if solid else "in the %s frame" % j.aspect, fix))
+        elif warn:
+            info["warnings"].append("the %s crop cuts the person around a face the script found (%s) at its %s "
+                                    "edge: %s." % (j.aspect, at, side, fix))
+        elif not (cut or shaded or covered or edged):
+            info["notes"].append("a face the script found (%s) is in frame and clear of the type on %s; --subject-box "
+                                 "%s marks it" % (at, j.aspect, _box_arg(fb)))
 
 
 def _check_post(j):
@@ -3873,6 +4256,7 @@ def _check_result(j):
             warnings.append("%d words of type; keep it to 8 or fewer so it reads at sidebar size." % n_words)
     _check_narrow(j)
     _check_subject_box(j)
+    _check_found_faces(j)
     _check_feed(j)
     info["warnings"] = list(dict.fromkeys(warnings))  # drop exact repeats, keep order
 
@@ -3882,7 +4266,8 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
            title_font=None, label_font=None, logo=None, logo_white=False, size="auto",
            panels=None, panel_labels=None, subjects=None, push=None, inset=None, inset_box=None,
            aspect=None, title_color="white", crop=None, title_tracking=None, subject_box=None,
-           system_fonts=False, band="auto", mode="thumbnail", body="", details="", backdrop="fade", trim=True):
+           system_fonts=False, band="auto", mode="thumbnail", body="", details="", backdrop="fade", trim=True,
+           face_check=True):
     """Return (thumbnail at master size, info dict with warnings and measurements).
 
     backdrop is what sits behind the type: "fade" (default) runs the photo under it, shaded toward the type;
@@ -3917,6 +4302,9 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
     always win. band ("auto", "top", "bottom") sets where the type band goes on 4:5 and 9:16 (a single
     capture without a cut-out); auto keeps it at the bottom unless the top keeps subject_box clearly more in view.
     trim=False keeps the capture and the panels whole: no letterbox or pillarbox bars are trimmed.
+    Without subject_box, a single capture without subjects is searched for a face (find_faces), measured like a
+    subject_box: it gets a warning naming the subject_box to pass when the crop cuts it, the shade darkens it or the
+    type covers it, and a note when it stays clear (info["faces"]). Nothing moves; face_check=False skips it.
     shade None (default) is the lightest shade that keeps every element at SHADE_TARGET contrast (_auto_shade,
     info["shade"]); a number fixes it, as up to v0.9.0."""
     if aspect is None:
@@ -3933,7 +4321,7 @@ def render(src=None, title="", label="", kicker="", subtitle="", lead="title", s
             subject_box=subject_box, system_fonts=system_fonts, band_pos=band, mode=mode, body=body,
             details=details, backdrop=backdrop, info=info, shade_auto=shade is None)
     j.given = dict(locals())  # read by _rerun
-    j.trim = trim
+    j.trim, j.face_check = trim, face_check
     _check_args(j)
     _load_sources(j)
     _choose_layout(j)
@@ -4031,13 +4419,13 @@ def squint(img):
     return img.convert("L").filter(ImageFilter.GaussianBlur(max(1.0, img.width / 80))).convert("RGB")
 
 
-BOX_COLORS = {"subject box": (0, 229, 255), "inset box": (255, 196, 0)}  # outlines on the boxes tile
+BOX_COLORS = {"subject box": (0, 229, 255), "inset box": (255, 196, 0), "face found": (255, 64, 200)}  # boxes tile
 
 
 def boxes_tile(thumb, w, h):
     """thumb at w x h with the --subject-box and --inset-box rects render recorded (thumb.info["boxes"], thumbnail
     px) outlined, a dark rim under each color so it shows on any picture: the check that a box estimated by eye
-    holds the face or the screen. None when there are no boxes."""
+    holds the face or the screen, and that a face the script warned about is one. None when there are no boxes."""
     boxes = thumb.info.get("boxes")
     if not boxes:
         return None
@@ -4060,7 +4448,7 @@ def preview_sheet(thumb):
     # (width, label, transform); notifications show no duration badge
     sizes = [(480, "home feed", "badge"), (320, "search", "badge"), (168, "up next", "badge"),
              (120, "smallest", "badge"), (88, "notification", None), (320, "squint test", "squint")]
-    if thumb.info.get("boxes"):  # where --subject-box and --inset-box landed (boxes_tile)
+    if thumb.info.get("boxes"):  # where --subject-box, --inset-box and a face found landed (boxes_tile)
         sizes.append((320, boxes_caption(thumb), "boxes"))
     gap, pad = 28, 28
     width = pad * 2 + sum(w for w, _, _ in sizes) + gap * (len(sizes) - 1)
@@ -4567,6 +4955,8 @@ def main(argv=None):
                     help="the bundled fonts, whatever the channel file says")
     ap.add_argument("--no-trim", action="store_true", help="keep the capture and panels whole: don't trim black "
                     "letterbox or pillarbox bars (a logo or product on a black field can pass for bars)")
+    ap.add_argument("--no-face-check", action="store_true", help="without --subject-box the script looks for a face "
+                    "and warns when the crop cuts it or the type or its shade covers it; this skips that check")
     ap.add_argument("--size", help="16:9 master size: auto (largest without upscaling), 720p, 1080p, 1440p, 4k")
     ap.add_argument("--channel", help="channel settings JSON (default: ./%s if present)" % CHANNEL_FILE)
     ap.add_argument("--feed", help="folder of other thumbnails to test yours against")
@@ -4667,7 +5057,8 @@ def main(argv=None):
                       subjects=[cut_out(open_image(p, "subject")) for p in args.subject or []] or None,
                       push=s["push"], inset=open_image(args.inset, "inset") if args.inset else None,
                       inset_box=args.inset_box, crop=args.crop, subject_box=args.subject_box, mode=s["mode"],
-                      body=args.body, details=args.details, backdrop=s["backdrop"], trim=not args.no_trim)
+                      body=args.body, details=args.details, backdrop=s["backdrop"], trim=not args.no_trim,
+                      face_check=not args.no_face_check)
         src = open_image(args.capture, "capture") if args.capture else None
     except ValueError as e:
         ap.error(str(e))

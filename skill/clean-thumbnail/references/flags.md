@@ -34,7 +34,8 @@ Each 16:9 variant writes a master `.jpg`, a `_phone.jpg` (1280x720, under 2 MB) 
 writes `_1280.jpg` instead of `_phone.jpg`, with a Facebook-style feed card as preview. The 16:9
 preview shows feed sizes with the duration badge, the 88 px notification and a squint test; the 4:5
 preview is a Facebook feed card and the 9:16 preview a Reels overlay with the profile-grid crop. When
-`--subject-box` or `--inset-box` is given, the last tile outlines the box. Piped
+`--subject-box` or `--inset-box` is given, the last tile outlines the box (cyan, amber); it also outlines a
+face the script found and warns about (magenta). Piped
 output is UTF-8, so printed paths are the real file names.
 
 <a id="text"></a>
@@ -82,6 +83,7 @@ design (`gothic`, `brush`); other fonts set them in capitals.
 | `--text-side left\|right` | Override the automatically chosen side (16:9 only; on 4:5 and 9:16 it is ignored with a note). |
 | `--band auto\|top\|bottom` | Where the type band goes on 4:5 and 9:16. `auto` keeps the bottom, or takes the top when that keeps `--subject-box` or `--inset` clearer. |
 | `--subject-box x0,y0,x1,y1` | Mark a face (brows to chin) or a product label. See [Recipes](#recipes). Not with `--panel` or `--subject`. |
+| `--no-face-check` | Skip the face check. Without `--subject-box`, on a single capture without `--subject`, the script looks for a face and warns when the type, its shade or a crop covers or cuts it. The check only warns and outlines; it never moves the type or the crop. |
 
 Vertical formats crop to the busiest part of the image unless `--focus` or a box says otherwise.
 The type goes in a band below the image (above it when there is a subject) or on the seam
@@ -153,12 +155,19 @@ frame, visible, under shade, under type), and the preview gets a last tile that 
 (cyan; an inset box is amber). Open that tile and check the box holds the face before you trust the
 line.
 
-**A different picture for 4:5 and 9:16** is often better. The 9:16 type sits mid-frame (safe zone),
-so it needs a frame with the face in the top third and something calm below. With a centered face,
-`--subject-box` moves the band to the top when that clears it and warns when it can't; without a box
-the band stays at the bottom and shades it. When the wide capture does not suit, ask for (or pick
-from the user's captures) one that does and render it in a second run with `--aspect 4:5,9:16` and
-the same `-o`: vertical files get `_4x5` and `_9x16` suffixes, so the 16:9 files stay.
+**No box given.** The script then looks for a face itself (OpenCV's frontal face cascade, run in NumPy;
+it finds faces turned toward the camera, not backs of heads, helmets or profiles). It moves nothing: a face
+the type, its shade or a crop would cover or cut gets a warning that names the `--subject-box` to pass,
+and the preview's last tile outlines it in magenta. If the outline holds a face, re-run with that box. A
+face that stays clear gets a note with its box.
+
+**A different picture for 4:5 and 9:16** is often better. The 9:16 type sits mid-frame (safe zone), so
+it needs a frame with the face in the top third and something calm below. With a centered face,
+`--subject-box` moves the band to the top when that clears it and warns when it can't; without a box the
+band stays at the bottom and shades it, and the face check warns when it finds the face there. When the
+wide capture does not suit, ask for (or pick from the user's captures) one that does and render it in a
+second run with `--aspect 4:5,9:16` and the same `-o`: vertical files get `_4x5` and `_9x16` suffixes,
+so the 16:9 files stay.
 
 **Subject in the middle.** In 16:9 the type and its shade then land on the subject whichever side
 they take, and `--focus` cannot help. With `--subject-box`, the warning prints a crop that clears
@@ -217,6 +226,8 @@ re-rendering.
 | `the art fills only N% of the frame's width` | Render art this tall as `--aspect 9:16`, or widen `--crop`. |
 | `type overlaps the inset image` | Use the `--band`, `--text-side` or `--inset-box` the warning names. |
 | `only N% of --subject-box is ...` | Use the printed `--crop` (and `--band`), or another frame. |
+| `the type overlaps a face the script found`, `the type shade (band) darkens a face the script found`, `only N% of a face the script found is ...`, `the 4:5 crop cuts the person around a face the script found` | Open the preview's last tile: if the magenta outline holds a face, re-run with the `--subject-box` the warning names, then fix what its own warnings say. If it outlines no face, pass `--no-face-check` and say so. |
+| `a face the script found (...) is in frame and clear of the type on 16:9` | Nothing. Pass the `--subject-box` it names if the other formats warn about that face. |
 | `subject N's face (the top third of the cut-out) falls under the Reels/Shorts caption area` | Use one subject for 9:16, or a cut-out from head to waist or lower. |
 | `type band at the top, clear of the inset` / `... the photo below it fills N% of the frame` | Information; `--band bottom` overrides. |
 | `the body ... runs outside ...: "word" is wider than the column` | Use `--aspect 4:5`, or ask the user to approve a shorter form (a short link). Do not cut their words yourself. |

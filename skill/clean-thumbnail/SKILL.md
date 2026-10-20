@@ -1,7 +1,7 @@
 ---
 name: clean-thumbnail
 description: Makes restrained, editorial YouTube thumbnails from real images, for any kind of video (gaming, trailers, walkthroughs, tech and hardware comparisons, sports, education, vlogs), in the style of publisher and press thumbnails instead of the loud template of glowing text, arrows, stickers and color washes. Use when someone wants a YouTube thumbnail, gives a video title with a screenshot, capture, photo or cut-out, wants a split-screen comparison thumbnail, wants themselves or a product placed in front of a background, or wants a thumbnail that doesn't look like AI slop or like everyone else's. Also makes Facebook and Instagram feed (4:5) and Reels, Shorts and Stories (9:16) versions, and standalone feed posts that keep the user's whole message. Turns the title into short type in the game's, film's or brand's own lettering and color, renders an A/B pair at up to 4K plus 2 MB phone copies, and checks contrast, the duration-badge corner, the Reels safe zone and feed sizes.
-license: MIT for the code; the bundled fonts are SIL OFL 1.1 (fonts/*/OFL.txt)
+license: MIT for the code; the bundled fonts are SIL OFL 1.1 (fonts/*/OFL.txt); the face model is OpenCV's, under the Intel open-source license in its header (models/haarcascade_frontalface_alt2.xml)
 compatibility: Python 3.8+ with numpy and Pillow. Uses its 16 bundled OFL fonts by default (Playfair Display and Outfit for the default title and label), so the same command gives the same type on every OS; --system-fonts opts into installed faces (Bodoni MT, Bahnschrift, Didot), and any font file can be passed in. Optional rembg for removing backgrounds from subject photos.
 metadata:
   author: Rizwan Ahmed
@@ -114,7 +114,8 @@ Decide this first; it changes what happens to the user's words.
    **Mark the subject.** When the capture shows a person, character or product, look at it and pass
    `--subject-box x0,y0,x1,y1` around the face, from the brows to the chin (or around the product's
    label). Type and shade then keep off it, and the warnings name a fix. Not with `--panel` or
-   `--subject`.
+   `--subject`. Without a box the script looks for a face itself and only warns, naming the
+   `--subject-box` to pass, when the type, its shade or a crop would cover or cut it.
 
    **Subject in the middle, or a wide frame that doesn't suit 4:5 and 9:16:** use `--crop`, or a
    second capture in a second run with `--aspect 4:5,9:16`
@@ -134,12 +135,14 @@ Decide this first; it changes what happens to the user's words.
      prompts, objective text and toasts. `--crop` them out or ask for a clean capture; the script
      does not detect them.
    - Read the `subject box:` line of every variant, and open the last preview tile, which outlines
-     `--subject-box` (cyan) and `--inset-box` (amber): the box must hold the face or screen. If the
-     box is shaded or under type on 16:9, re-run with the `--crop` the warning suggests instead of
-     shrinking the type. On 9:16 the script can only move the band to the top or bottom; if the face
-     is still shaded, shorten the text or use another frame, and tell the user if it stays shaded.
+     `--subject-box` (cyan), `--inset-box` (amber) and a face the script warns about (magenta): the box
+     must hold the face or screen. If the magenta box holds a face, re-run with the `--subject-box` its
+     warning names; if not, pass `--no-face-check`. If the box is shaded or under type on 16:9, re-run
+     with the `--crop` the warning suggests instead of shrinking the type. On 9:16 the script can only
+     move the band to the top or bottom; if the face is still shaded, shorten the text or use another
+     frame, and tell the user if it stays shaded.
    - Without a box, check in the 4:5 and 9:16 previews that the crop kept what matters; if it framed
-     scenery, pass `--focus`.
+     scenery, pass `--focus`. The face check finds faces turned toward the camera, not backs of heads.
    - With `auto` color, the `colors:` line and preview should show the color the image is known for;
      if it took a side color (a red sign in a blue scene), give the right hex code or use white.
    - With a subject, check that it looks photographed with the background: no halo, no mismatched

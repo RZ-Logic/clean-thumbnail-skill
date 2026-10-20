@@ -27,9 +27,10 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "skill", "clean-thumbnail", "scripts", "thumb.py")
 FONTS = os.path.join(ROOT, "skill", "clean-thumbnail", "fonts")
+FACE_MODEL = os.path.join(ROOT, "skill", "clean-thumbnail", "models", "haarcascade_frontalface_alt2.xml")
 BROKEN = ("NameError", "AttributeError", "ImportError", "ModuleNotFoundError", "SyntaxError", "IndentationError")
 TEST_MODULES = ("test_thumb", "test_backdrop", "test_fix_text", "test_fix_post", "test_fix_layout", "test_fix_io",
-                "test_fix_shade")  # test ids: "Class.test" (test_thumb) or "module.Class.test"
+                "test_fix_shade", "test_no_box_subject")  # test ids: "Class.test" (test_thumb) or "module.Class.test"
 
 BAND_FLIP = '    if not j.band_forced and j.anchor == "bottom" and scores["top"]["score"] >= scores["bottom"]["score"] + BAND_MARGIN:'
 MUTANTS = [
@@ -277,7 +278,7 @@ MUTANTS = [
     ("fade gets solid info", "    if j.backdrop != \"solid\":\n        return\n    cv, src, info = j.cv, j.src, j.info",
      "    if False:\n        return\n    cv, src, info = j.cv, j.src, j.info",
      "test_backdrop.FadeDefault.test_fade_is_the_default_and_identical"),
-    ("render defaults to solid", 'body="", details="", backdrop="fade", trim=True):', 'body="", details="", backdrop="solid", trim=True):',
+    ("render defaults to solid", 'body="", details="", backdrop="fade", trim=True,', 'body="", details="", backdrop="solid", trim=True,',
      "test_backdrop.FadeDefault.test_fade_is_the_default_and_identical"),
     ("channel default is solid", '                mode="thumbnail", backdrop="fade")', '                mode="thumbnail", backdrop="solid")',
      "test_backdrop.SolidCLI.test_cli_prints_the_backdrop_line_after_colors"),
@@ -593,13 +594,13 @@ MUTANTS = [
      "    if crop is not None and tuple(crop) == (0, 0, 1, 1):", "test_fix_io.NoTrim.test_no_trim_and_full_frame_crop_keep_the_frame"),
     ("P1: a full-frame crop still trims", "    if not trim or (crop is not None and tuple(crop) == (0, 0, 1, 1)):",
      "    if not trim:", "test_fix_io.NoTrim.test_no_trim_and_full_frame_crop_keep_the_frame"),
-    ("P1: render drops trim", "    j.trim = trim\n", "    j.trim = True\n",
+    ("P1: render drops trim", "    j.trim, j.face_check = trim, face_check\n", "    j.trim, j.face_check = True, face_check\n",
      "test_fix_io.NoTrim.test_no_trim_and_full_frame_crop_keep_the_frame"),
     ("P1: panels trimmed with --no-trim", "    if j.trim:\n        for i, p in enumerate(panels):",
      "    if True:\n        for i, p in enumerate(panels):", "test_fix_io.NoTrim.test_no_trim_keeps_panels_whole"),
     ("P1: no note on a trim", "        if kept != asked:  # say so", "        if False:  # say so",
      "test_fix_io.NoTrim.test_no_trim_and_full_frame_crop_keep_the_frame"),
-    ("P1: CLI drops --no-trim", "trim=not args.no_trim)", "trim=True)", "test_fix_io.NoTrim.test_cli_no_trim"),
+    ("P1: CLI drops --no-trim", "trim=not args.no_trim,", "trim=True,", "test_fix_io.NoTrim.test_cli_no_trim"),
     ("image-pipeline-4: large images trimmed at full size", "    if g.width * g.height > TRIM_MAX_PIXELS:",
      "    if False:", "test_fix_io.SparseContentOnBlack.test_large_images_are_measured_on_a_reduced_copy"),
     ("image-pipeline-2: ICC profiles ignored", '    if not icc or ImageCms is None or img.mode not in ("RGB", "RGBA", "CMYK"):',
@@ -715,8 +716,8 @@ MUTANTS = [
      '    if False:\n        built["canvas"].info["boxes"] = boxes', "test_fix_shade.PreviewBoxes.test_sheet_gets_a_boxes_tile"),
     ("skill-docs-3: boxes not outlined", "        d.rectangle(r, outline=BOX_COLORS.get(name, WHITE), width=2)",
      "        pass", "test_fix_shade.PreviewBoxes.test_sheet_gets_a_boxes_tile"),
-    ("skill-docs-3: no boxes tile on the sheet", '    if thumb.info.get("boxes"):  # where --subject-box and --inset-box landed',
-     '    if False:  # where --subject-box and --inset-box landed', "test_fix_shade.PreviewBoxes.test_sheet_gets_a_boxes_tile"),
+    ("skill-docs-3: no boxes tile on the sheet", '    if thumb.info.get("boxes"):  # where --subject-box, --inset-box',
+     '    if False:  # where --subject-box, --inset-box', "test_fix_shade.PreviewBoxes.test_sheet_gets_a_boxes_tile"),
     ("skill-docs-3: the feed card has no boxes panel",
      "    width = pad * 2 + sum(w for w, _ in widths) + 360 + gap * len(widths) + (360 + gap if boxes else 0)",
      "    width = pad * 2 + sum(w for w, _ in widths) + 360 + gap * len(widths)",
@@ -757,6 +758,51 @@ MUTANTS = [
     ("upscale names an outside tool",'"higher." % (src.width, src.height, scale, cv.w, cv.h))',
      '"higher, or upscale with Real-ESRGAN first." % (src.width, src.height, scale, cv.w, cv.h))',
      "test_fix_io.UpscaleAdvice.test_upscale_warning_names_only_a_recapture"),
+    # no --subject-box: the face check (find_faces, _check_found_faces)
+    ("no-box: no face check", "    _check_found_faces(j)\n    _check_feed(j)", "    _check_feed(j)",
+     "test_no_box_subject.FoundFace.test_black_flag_16x9_warns_and_names_the_box"),
+    ("no-box: type over a face not checked", '        covered = view["glyphs"] > 0.02 or view["under_type"] > 0.10',
+     "        covered = False", "test_no_box_subject.FoundFace.test_black_flag_16x9_warns_and_names_the_box"),
+    ("no-box: the named box rounds inward", "    lo = [np.floor(v * 1000 + 1e-6) / 1000 for v in box[:2]]",
+     "    lo = [np.round(v * 1000) / 1000 for v in box[:2]]",
+     "test_no_box_subject.FoundFace.test_black_flag_16x9_warns_and_names_the_box"),
+    ("no-box: face out of frame not checked", '        cut = view["inside"] < FACE_IN_FRAME', "        cut = False",
+     "test_no_box_subject.FoundFace.test_vertical_crops_warn"),
+    ("no-box: crop through the person not checked", "        side = _crop_edge(j, view)", "        side = None",
+     "test_no_box_subject.FoundFace.test_vertical_crops_warn"),
+    ("no-box: shade over a face not checked",
+     '                  and (view["shade_vis"] < FACE_SHADE_VIS or view["shade_heavy"] > FACE_SHADE_HEAVY))',
+     "                  and False)", "test_no_box_subject.FoundFace.test_shade_alone_is_reported"),
+    ("no-box: a clear face gets no note", "        elif not (cut or shaded or covered or edged):",
+     "        elif False:", "test_no_box_subject.FoundFace.test_clear_face_gets_a_note"),
+    ("no-box: the face is not remapped through --crop",
+     '        b = remap_box(face["box"], j.given_size, j.kept_px)', '        b = face["box"]',
+     "test_no_box_subject.FoundFace.test_found_face_lands_where_its_box_would"),
+    ("no-box: CLI ignores --no-face-check", "face_check=not args.no_face_check)", "face_check=True)",
+     "test_no_box_subject.FoundFace.test_cli_warns_and_no_face_check_skips_it"),
+    ("no-box: the check overrides an explicit box",
+     "if not j.face_check or j.subject_box_given is not None or j.layout", "if not j.face_check or j.layout",
+     "test_no_box_subject.FaceCheckScope.test_explicit_box_wins"),
+    ("no-box: face_check=False ignored", "    j.trim, j.face_check = trim, face_check", "    j.trim = trim",
+     "test_no_box_subject.FaceCheckScope.test_off_switch"),
+    ("no-box: a crop through the person under --focus",
+     '    if j.focus is not None:\n        return None\n    rect, mapper = view["rect"], j.built["mapper"]',
+     '    rect, mapper = view["rect"], j.built["mapper"]',
+     "test_no_box_subject.FaceCheckScope.test_focus_and_crop_are_the_users_choice"),
+    ("no-box: a face --crop cut away is reported", "            continue  # --crop (or a bar) cut it away",
+     "            pass  # --crop (or a bar) cut it away",
+     "test_no_box_subject.FaceCheckScope.test_focus_and_crop_are_the_users_choice"),
+    ("no-box: cut-outs get the face check", 'j.layout != "single" or j.subjects:', 'j.layout != "single":',
+     "test_no_box_subject.FaceCheckScope.test_cutouts_and_panels_keep_their_own_checks"),
+    ("no-box: any window is a face", "FACE_MIN_HITS = 18  #", "FACE_MIN_HITS = 1  #",
+     "test_no_box_subject.NoFalseAlarms.test_scenery_stays_silent"),
+    ("no-box: a panorama is scanned whole", ", (FACE_PIXELS / float(W0 * H0)) ** 0.5)", ")",
+     "ReviewInputs.test_huge_wide_source_renders_tall_without_resizing_everything"),
+    ("no-box: the preview skips the face",
+     '    boxes += [("face found", f["rect"]) for f in info.get("faces", []) if f["outlined"]]\n', "",
+     "test_no_box_subject.FacePreview.test_boxes_tile_outlines_the_face"),
+    ("no-box: every face found is outlined", 'for f in info.get("faces", []) if f["outlined"]]',
+     'for f in info.get("faces", [])]', "test_no_box_subject.FacePreview.test_clear_face_is_not_outlined"),
 ]
 
 
@@ -765,6 +811,7 @@ def load(path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     mod.FONT_ROOT, mod._catalog = FONTS, None  # a temp copy must still find the bundled fonts
+    mod.FACE_MODEL, mod._face_model = FACE_MODEL, None  # ... and the face model
     return mod
 
 
