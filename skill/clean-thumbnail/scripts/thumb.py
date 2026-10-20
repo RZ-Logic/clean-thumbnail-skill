@@ -46,7 +46,7 @@ try:
 except ImportError:
     ImageCms = None
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 SIZES = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440), "4k": (3840, 2160)}
 PHONE_SIZE = (1280, 720)

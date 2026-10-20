@@ -5,7 +5,7 @@ license: MIT for the code; the bundled fonts are SIL OFL 1.1 (fonts/*/OFL.txt); 
 compatibility: Python 3.8+ with numpy and Pillow. Uses its 16 bundled OFL fonts by default (Playfair Display and Outfit for the default title and label), so the same command gives the same type on every OS; --system-fonts opts into installed faces (Bodoni MT, Bahnschrift, Didot), and any font file can be passed in. Optional rembg for removing backgrounds from subject photos.
 metadata:
   author: Rizwan Ahmed
-  version: "0.9.1"
+  version: "0.9.2"
 ---
 
 # Clean thumbnail
