@@ -246,6 +246,28 @@ class NoFalseAlarms(unittest.TestCase):
         self.assertIn("clean-thumbnail/models/haarcascade_frontalface_alt2.xml", built_zip_names())
 
 
+class FaceCheckSkips(unittest.TestCase):
+    """A check that can't run says so: a gray capture (the finder gates on skin tone) or a missing model file."""
+
+    def test_gray_capture_says_the_check_was_skipped(self):
+        gray = edward().convert("L").convert("RGB")
+        _, info = thumb.render(gray, TITLE, LABEL, size="720p", lead="title")
+        self.assertTrue(any(n.startswith("face check skipped: the capture has no color") for n in info["notes"]),
+                        info["notes"])
+        _, info = thumb.render(edward(), TITLE, LABEL, size="720p", lead="title")
+        self.assertFalse(any(n.startswith("face check skipped") for n in info["notes"]), info["notes"])
+
+    def test_missing_model_says_the_check_was_skipped(self):
+        model, cached = thumb.FACE_MODEL, thumb._face_model
+        thumb.FACE_MODEL, thumb._face_model = os.path.join(HERE, "no-such-model.xml"), None
+        try:
+            _, info = thumb.render(edward(), TITLE, LABEL, size="720p", lead="title")
+        finally:
+            thumb.FACE_MODEL, thumb._face_model = model, cached
+        self.assertTrue(any(n.startswith("face check skipped: models/") for n in info["notes"]), info["notes"])
+        self.assertEqual(found_warnings(info), [])
+
+
 class FacePreview(unittest.TestCase):
     """The preview's boxes tile outlines a face the check warned about, so the box can be confirmed by eye."""
 

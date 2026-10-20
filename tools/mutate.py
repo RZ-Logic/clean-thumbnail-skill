@@ -803,6 +803,13 @@ MUTANTS = [
      "test_no_box_subject.FacePreview.test_boxes_tile_outlines_the_face"),
     ("no-box: every face found is outlined", 'for f in info.get("faces", []) if f["outlined"]]',
      'for f in info.get("faces", [])]', "test_no_box_subject.FacePreview.test_clear_face_is_not_outlined"),
+    ("no-box: a missing model passes quietly",
+     '        info["notes"].append("face check skipped: models/%s not found; mark any face with --subject-box"\n'
+     '                             % os.path.basename(FACE_MODEL))\n',
+     "        pass\n", "test_no_box_subject.FaceCheckSkips.test_missing_model_says_the_check_was_skipped"),
+    ("no-box: a gray capture passes quietly",
+     "    if int((hue.max(axis=2) - hue.min(axis=2)).max()) <= 6:",
+     "    if False:", "test_no_box_subject.FaceCheckSkips.test_gray_capture_says_the_check_was_skipped"),
 ]
 
 

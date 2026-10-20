@@ -3994,6 +3994,15 @@ def _check_found_faces(j):
     cv, info = j.cv, j.info
     info["faces"] = []
     solid = j.backdrop == "solid"
+    if face_cascade() is None:  # a copied skill without its models folder: say so rather than pass quietly
+        info["notes"].append("face check skipped: models/%s not found; mark any face with --subject-box"
+                             % os.path.basename(FACE_MODEL))
+        return
+    hue = np.asarray(j.src_given.convert("RGB").resize((64, 36), Image.BOX), dtype=np.int16)
+    if int((hue.max(axis=2) - hue.min(axis=2)).max()) <= 6:  # the finder gates on skin tone: no color, no faces
+        info["notes"].append("face check skipped: the capture has no color, and the check looks for skin tones; "
+                             "mark any face with --subject-box")
+        return
     for face in find_faces(j.src_given):
         b = remap_box(face["box"], j.given_size, j.kept_px)
         c = tuple(min(max(v, 0.0), 1.0) for v in b)

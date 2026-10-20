@@ -159,7 +159,10 @@ line.
 it finds faces turned toward the camera, not backs of heads, helmets or profiles). It moves nothing: a face
 the type, its shade or a crop would cover or cut gets a warning that names the `--subject-box` to pass,
 and the preview's last tile outlines it in magenta. If the outline holds a face, re-run with that box. A
-face that stays clear gets a note with its box.
+face that stays clear gets a note with its box. It misses dim, noisy or small faces (under about 4% of the
+frame's height), and a gray or black-and-white capture is skipped with a note, since the check looks for skin
+tones; mark those faces by hand. A rare skin-toned texture can pass as a face: if the outline holds no face,
+pass `--no-face-check`.
 
 **A different picture for 4:5 and 9:16** is often better. The 9:16 type sits mid-frame (safe zone), so
 it needs a frame with the face in the top third and something calm below. With a centered face,
@@ -226,8 +229,9 @@ re-rendering.
 | `the art fills only N% of the frame's width` | Render art this tall as `--aspect 9:16`, or widen `--crop`. |
 | `type overlaps the inset image` | Use the `--band`, `--text-side` or `--inset-box` the warning names. |
 | `only N% of --subject-box is ...` | Use the printed `--crop` (and `--band`), or another frame. |
-| `the type overlaps a face the script found`, `the type shade (band) darkens a face the script found`, `only N% of a face the script found is ...`, `the 4:5 crop cuts the person around a face the script found` | Open the preview's last tile: if the magenta outline holds a face, re-run with the `--subject-box` the warning names, then fix what its own warnings say. If it outlines no face, pass `--no-face-check` and say so. |
+| `the type overlaps a face the script found`, `the type shade (band) darkens a face the script found`, `only N% of a face the script found is ...`, `the 4:5 (or 9:16, 16:9) crop cuts the person around a face the script found` | Open the preview's last tile: if the magenta outline holds a face, re-run with the `--subject-box` the warning names, then fix what its own warnings say. If it outlines no face, pass `--no-face-check` and say so. |
 | `a face the script found (...) is in frame and clear of the type on 16:9` | Nothing. Pass the `--subject-box` it names if the other formats warn about that face. |
+| `face check skipped: the capture has no color ...` or `face check skipped: models/... not found` | The script couldn't look for faces: mark any face with `--subject-box`. For the second, copy the skill's `models/` folder with it. |
 | `subject N's face (the top third of the cut-out) falls under the Reels/Shorts caption area` | Use one subject for 9:16, or a cut-out from head to waist or lower. |
 | `type band at the top, clear of the inset` / `... the photo below it fills N% of the frame` | Information; `--band bottom` overrides. |
 | `the body ... runs outside ...: "word" is wider than the column` | Use `--aspect 4:5`, or ask the user to approve a shorter form (a short link). Do not cut their words yourself. |
